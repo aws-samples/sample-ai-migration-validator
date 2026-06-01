@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# -----------------------------------------------------------------------------
+# Migration Validator — single launcher.
+#
+# First run: creates a Python virtual env and installs all deps automatically.
+# Subsequent runs: starts the validator immediately.
+#
+# Usage:
+#   ./run                       # interactive (asks for source/target/mode)
+#   ./run --mode auto           # skip the mode prompt, run all phases
+#   ./run --config config.yaml  # load a saved config
+#   ./run --help                # show all flags
+# -----------------------------------------------------------------------------
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_ROOT"
+
+VENV_DIR=".venv"
+STAMP_FILE="$VENV_DIR/.migration-validator-installed"
+
+c_blue() { printf "\033[1;34m%s\033[0m" "$*"; }
+c_dim()  { printf "\033[2m%s\033[0m"   "$*"; }
+log()    { printf "%s %s\n" "$(c_blue '[validator]')" "$*"; }
+
+# -----------------------------------------------------------------------------
+# 1. Locate a usable Python (>=3.11). Prefer 3.12.
+# -----------------------------------------------------------------------------
+find_python() {
+  for candidate in python3.12 python3.13 python3.11 python3; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      if "$candidate" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+        echo "$candidate"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+PY="$(find_python || true)"
+if [[ -z "${PY:-}" ]]; then
+  echo "[validator] Python 3.11+ is required. Install it with:"
+  case "$(uname -s)" in
+    Darwin*) echo "    brew install python@3.12" ;;
+    Linux*)  echo "    sudo apt-get install -y python3.12 python3.12-venv  (Debian/Ubuntu)" ;;
+  esac
+  exit 1
+fi
+
+# -----------------------------------------------------------------------------
+# 2. First-run bootstrap. Idempotent: a stamp file gates the install step.
+# -----------------------------------------------------------------------------
+if [[ ! -f "$STAMP_FILE" ]]; then
+  log "First run detected — setting up the validator (this happens once)"
+  log "Using $(c_dim "$($PY --version) at $(command -v "$PY")")"
+
+  if [[ ! -d "$VENV_DIR" ]]; then
+    log "Creating virtual env at $VENV_DIR"
+    "$PY" -m venv "$VENV_DIR"
+  fi
+
+  # shellcheck disable=SC1091
+  source "$VENV_DIR/bin/activate"
+
+  log "Upgrading pip"
+  python -m pip install --upgrade pip --quiet
+
+  log "Installing the migration validator and its dependencies"
+  python -m pip install --quiet -e "."
+
+  date -u +"%Y-%m-%dT%H:%M:%SZ" > "$STAMP_FILE"
+  log "Setup complete"
+  echo
+fi
+
+# -----------------------------------------------------------------------------
+# 3. Activate venv + run
+# -----------------------------------------------------------------------------
+# shellcheck disable=SC1091
+source "$VENV_DIR/bin/activate"
+exec python -m migration_validator "$@"

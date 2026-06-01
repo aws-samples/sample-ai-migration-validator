@@ -1,0 +1,32 @@
+# Example configuration file for the Migration Validator.
+#
+#   * Copy to ./config.yaml and edit.
+#   * Any value can reference an environment variable: ${MY_VAR}.
+#   * Passwords should ideally come from Secrets Manager, not from this file.
+
+mode: interactive               # interactive | auto
+region: us-east-1
+bedrock_model: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+report_dir: ./reports
+perf_threshold_ms: 5
+sample_size: 100
+
+source:
+  engine: sqlserver
+  host: sqlserver.example.internal
+  port: 1433
+  database: AdventureWorks2016
+  username: validator_ro
+  password: ${SOURCE_PASSWORD}    # export SOURCE_PASSWORD=...
+  schema_name: dbo
+  encrypt: true
+
+target:
+  engine: postgresql
+  host: aurora-postgres.example.internal
+  port: 5432
+  database: adventureworks
+  username: validator_ro
+  password: ${TARGET_PASSWORD}    # export TARGET_PASSWORD=...
+  schema_name: public
+  encrypt: true

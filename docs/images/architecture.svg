@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 700" font-family="-apple-system, Segoe UI, Roboto, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#475569"/>
+    </marker>
+    <linearGradient id="userBg" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#e0f2fe"/>
+      <stop offset="100%" stop-color="#bae6fd"/>
+    </linearGradient>
+    <linearGradient id="orchBg" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#fef3c7"/>
+      <stop offset="100%" stop-color="#fde68a"/>
+    </linearGradient>
+    <linearGradient id="agentBg" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#fef9c3"/>
+      <stop offset="100%" stop-color="#fde68a"/>
+    </linearGradient>
+    <linearGradient id="mcpBg" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#dcfce7"/>
+      <stop offset="100%" stop-color="#bbf7d0"/>
+    </linearGradient>
+    <linearGradient id="dbBg" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#e0e7ff"/>
+      <stop offset="100%" stop-color="#c7d2fe"/>
+    </linearGradient>
+    <linearGradient id="awsBg" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#ffedd5"/>
+      <stop offset="100%" stop-color="#fed7aa"/>
+    </linearGradient>
+  </defs>
+
+  <style>
+    .lbl  { font-size: 13px; fill: #0f172a; }
+    .sub  { font-size: 11px; fill: #475569; }
+    .h1   { font-size: 18px; font-weight: 700; fill: #0f172a; }
+    .box  { stroke: #94a3b8; stroke-width: 1.2; }
+    .line { stroke: #475569; stroke-width: 1.5; fill: none; }
+    .pill { font-size: 10px; fill: #334155; }
+  </style>
+
+  <!-- Title -->
+  <text x="550" y="34" text-anchor="middle" class="h1">AI Migration Validator — architecture</text>
+  <text x="550" y="54" text-anchor="middle" class="sub">SQL Server → PostgreSQL · Strands Agents · MCP · Amazon Bedrock</text>
+
+  <!-- User -->
+  <rect x="450" y="80"  width="200" height="60" rx="10" class="box" fill="url(#userBg)"/>
+  <text x="550" y="105" text-anchor="middle" class="lbl" font-weight="600">User (CLI)</text>
+  <text x="550" y="125" text-anchor="middle" class="sub">./run --mode auto</text>
+
+  <!-- Orchestrator -->
+  <rect x="370" y="170" width="360" height="80" rx="10" class="box" fill="url(#orchBg)"/>
+  <text x="550" y="195" text-anchor="middle" class="lbl" font-weight="600">Orchestrator</text>
+  <text x="550" y="215" text-anchor="middle" class="sub">prompts · capability menu · interactive / auto · spinner</text>
+  <text x="550" y="232" text-anchor="middle" class="sub">writes HTML + JSON report (PII redacted)</text>
+
+  <line x1="550" y1="140" x2="550" y2="170" class="line" marker-end="url(#arrow)"/>
+
+  <!-- Agents row -->
+  <g>
+    <rect x="60"  y="290" width="200" height="80" rx="10" class="box" fill="url(#agentBg)"/>
+    <text x="160" y="315" text-anchor="middle" class="lbl" font-weight="600">Inventory Agent</text>
+    <text x="160" y="335" text-anchor="middle" class="sub">tables, views, procs,</text>
+    <text x="160" y="350" text-anchor="middle" class="sub">funcs, indexes, sequences</text>
+
+    <rect x="280" y="290" width="200" height="80" rx="10" class="box" fill="url(#agentBg)"/>
+    <text x="380" y="315" text-anchor="middle" class="lbl" font-weight="600">Row-Count Agent</text>
+    <text x="380" y="335" text-anchor="middle" class="sub">COUNT(*) per table</text>
+    <text x="380" y="350" text-anchor="middle" class="sub">case-aware diff</text>
+
+    <rect x="500" y="290" width="200" height="80" rx="10" class="box" fill="url(#agentBg)"/>
+    <text x="600" y="315" text-anchor="middle" class="lbl" font-weight="600">Functional Agent</text>
+    <text x="600" y="335" text-anchor="middle" class="sub">3 test cases from real data</text>
+    <text x="600" y="350" text-anchor="middle" class="sub">EXEC / CALL · diff results</text>
+
+    <rect x="720" y="290" width="200" height="80" rx="10" class="box" fill="url(#agentBg)"/>
+    <text x="820" y="315" text-anchor="middle" class="lbl" font-weight="600">Performance Agent</text>
+    <text x="820" y="335" text-anchor="middle" class="sub">median timing × 3 cases</text>
+    <text x="820" y="350" text-anchor="middle" class="sub">flag if Δ &gt; 5 ms</text>
+  </g>
+
+  <line x1="450" y1="250" x2="160" y2="290" class="line" marker-end="url(#arrow)"/>
+  <line x1="490" y1="250" x2="380" y2="290" class="line" marker-end="url(#arrow)"/>
+  <line x1="610" y1="250" x2="600" y2="290" class="line" marker-end="url(#arrow)"/>
+  <line x1="650" y1="250" x2="820" y2="290" class="line" marker-end="url(#arrow)"/>
+
+  <!-- MCP layer -->
+  <rect x="200" y="420" width="320" height="80" rx="10" class="box" fill="url(#mcpBg)"/>
+  <text x="360" y="445" text-anchor="middle" class="lbl" font-weight="600">SQL Server MCP server</text>
+  <text x="360" y="465" text-anchor="middle" class="sub">FastMCP · python-tds</text>
+  <text x="360" y="482" text-anchor="middle" class="sub">read-only guard · stdio subprocess</text>
+
+  <rect x="580" y="420" width="320" height="80" rx="10" class="box" fill="url(#mcpBg)"/>
+  <text x="740" y="445" text-anchor="middle" class="lbl" font-weight="600">PostgreSQL MCP server</text>
+  <text x="740" y="465" text-anchor="middle" class="sub">FastMCP · psycopg3</text>
+  <text x="740" y="482" text-anchor="middle" class="sub">refcursor / typed args / read-only</text>
+
+  <line x1="380" y1="370" x2="360" y2="420" class="line" marker-end="url(#arrow)"/>
+  <line x1="600" y1="370" x2="600" y2="420" class="line" marker-end="url(#arrow)"/>
+  <line x1="820" y1="370" x2="740" y2="420" class="line" marker-end="url(#arrow)"/>
+
+  <!-- DB layer -->
+  <rect x="200" y="540" width="320" height="80" rx="10" class="box" fill="url(#dbBg)"/>
+  <text x="360" y="565" text-anchor="middle" class="lbl" font-weight="600">Microsoft SQL Server (source)</text>
+  <text x="360" y="585" text-anchor="middle" class="sub">on-prem · EC2 · Azure SQL · RDS</text>
+  <text x="360" y="602" text-anchor="middle" class="sub">read-only DB user · TLS required</text>
+
+  <rect x="580" y="540" width="320" height="80" rx="10" class="box" fill="url(#dbBg)"/>
+  <text x="740" y="565" text-anchor="middle" class="lbl" font-weight="600">Aurora / RDS PostgreSQL (target)</text>
+  <text x="740" y="585" text-anchor="middle" class="sub">read-only DB user · sslmode=require</text>
+  <text x="740" y="602" text-anchor="middle" class="sub">post-DMS / SCT migration</text>
+
+  <line x1="360" y1="500" x2="360" y2="540" class="line" marker-end="url(#arrow)"/>
+  <line x1="740" y1="500" x2="740" y2="540" class="line" marker-end="url(#arrow)"/>
+
+  <!-- AWS services on the right -->
+  <rect x="950" y="170" width="120" height="60" rx="8" class="box" fill="url(#awsBg)"/>
+  <text x="1010" y="195" text-anchor="middle" class="lbl" font-weight="600">Bedrock</text>
+  <text x="1010" y="213" text-anchor="middle" class="sub">+ Guardrails (opt)</text>
+
+  <rect x="950" y="250" width="120" height="60" rx="8" class="box" fill="url(#awsBg)"/>
+  <text x="1010" y="275" text-anchor="middle" class="lbl" font-weight="600">Secrets</text>
+  <text x="1010" y="293" text-anchor="middle" class="sub">Manager</text>
+
+  <line x1="730" y1="200" x2="950" y2="200" class="line" marker-end="url(#arrow)"/>
+  <line x1="730" y1="240" x2="950" y2="280" class="line" marker-end="url(#arrow)"/>
+
+  <!-- footer note -->
+  <text x="40" y="675" class="sub">Network path: validator host -> interface endpoints (Bedrock / Secrets Manager / KMS / STS / Logs) -> AWS APIs. No public-internet egress required.</text>
+</svg>

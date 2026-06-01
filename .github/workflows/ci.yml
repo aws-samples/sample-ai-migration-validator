@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ruff
+        run: pip install ruff==0.4.10
+      - name: ruff check
+        run: ruff check .
+      - name: ruff format
+        run: ruff format --check .
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      - name: pytest
+        run: pytest -q
+
+  python-security:
+    name: python-security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install scanners
+        run: pip install bandit==1.7.9 pip-audit==2.7.3
+      - name: bandit
+        run: bandit -c pyproject.toml -r src mcp_servers
+      - name: pip-audit
+        run: pip-audit --strict
+
+  cloudformation:
+    name: cloudformation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install cfn-lint
+        run: pip install cfn-lint==1.51.1
+      - name: cfn-lint
+        # --include-checks I turns on the informational ruleset (best-practice
+        # warnings beyond plain syntax). aws-samples reviewers expect this.
+        run: cfn-lint --include-checks I deploy/cloudformation/template.yaml
+
+      - name: Install cfn-nag (Ruby)
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+      - run: gem install cfn-nag --no-document
+      - name: cfn-nag
+        run: cfn_nag_scan --input-path deploy/cloudformation --fail-on-warnings
+
+  container-scan:
+    name: container-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: |
+          docker build \
+            -f deploy/docker/Dockerfile \
+            -t migration-validator:ci \
+            .
+
+      - name: Trivy image scan
+        # Fail the job on HIGH or CRITICAL, regardless of fix status.
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: migration-validator:ci
+          format: sarif
+          output: trivy-image.sarif
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          ignore-unfixed: false
+          vuln-type: os,library
+
+      - name: Upload Trivy SARIF to code-scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      - name: Trivy filesystem scan (secrets + misconfig)
+        if: always()
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          format: sarif
+          output: trivy-fs.sarif
+          severity: HIGH,CRITICAL
+          scanners: secret,misconfig
+          exit-code: '0'
+
+      - name: Upload Trivy filesystem SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
