@@ -117,9 +117,32 @@ def verify_connection() -> str:
     return json.dumps({"ok": True, "info": info})
 
 
+def _check_schema_allowlist(sql: str) -> str | None:
+    """If PG_ALLOWED_SCHEMA is set, reject queries referencing other schemas.
+
+    This is defense-in-depth — the primary access control is the DB user's grants.
+    Returns an error message string if rejected, or None if OK.
+    """
+    import re as _re
+
+    allowed = os.environ.get("PG_ALLOWED_SCHEMA", "").strip()
+    if not allowed:
+        return None
+    # Match FROM/JOIN "schema"."table" or schema.table patterns
+    pattern = r'(?:FROM|JOIN)\s+"?(\w+)"?\s*\.\s*"?\w+"?'
+    refs = _re.findall(pattern, sql, flags=_re.IGNORECASE)
+    for ref in refs:
+        if ref.lower() != allowed.lower():
+            return f"Query references schema '{ref}' which is not in the allowed list ('{allowed}')"
+    return None
+
+
 @mcp.tool()
 def execute_select(sql: str) -> str:
     """Execute a read-only PostgreSQL query and return JSON-formatted rows."""
+    schema_err = _check_schema_allowlist(sql)
+    if schema_err:
+        return json.dumps({"error": "rejected", "reason": schema_err})
     try:
         rows = _query(sql)
     except UnsafeStatementError as e:

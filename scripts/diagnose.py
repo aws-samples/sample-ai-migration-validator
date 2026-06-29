@@ -55,22 +55,24 @@ def diagnose_sqlserver() -> None:
 
     print(f"\nObject counts in schema '{schema}':")
     cur.execute(
-        f"""
-        SELECT 'tables' AS bucket, COUNT(*) AS n FROM INFORMATION_SCHEMA.TABLES
-          WHERE table_schema = '{schema}' AND table_type = 'BASE TABLE'
-        UNION ALL
-        SELECT 'views', COUNT(*) FROM INFORMATION_SCHEMA.VIEWS WHERE table_schema = '{schema}'
-        UNION ALL
-        SELECT 'routines', COUNT(*) FROM INFORMATION_SCHEMA.ROUTINES WHERE routine_schema = '{schema}'
         """
+        SELECT 'tables' AS bucket, COUNT(*) AS n FROM INFORMATION_SCHEMA.TABLES
+          WHERE table_schema = %s AND table_type = 'BASE TABLE'
+        UNION ALL
+        SELECT 'views', COUNT(*) FROM INFORMATION_SCHEMA.VIEWS WHERE table_schema = %s
+        UNION ALL
+        SELECT 'routines', COUNT(*) FROM INFORMATION_SCHEMA.ROUTINES WHERE routine_schema = %s
+        """,
+        (schema, schema, schema),
     )
     for r in cur.fetchall():
         print(f"  {r['bucket']:>10}: {r['n']}")
 
     print(f"\nFirst 20 tables in '{schema}':")
     cur.execute(
-        f"""SELECT TOP 20 table_name FROM INFORMATION_SCHEMA.TABLES
-            WHERE table_schema = '{schema}' AND table_type = 'BASE TABLE' ORDER BY table_name"""
+        """SELECT TOP 20 table_name FROM INFORMATION_SCHEMA.TABLES
+            WHERE table_schema = %s AND table_type = 'BASE TABLE' ORDER BY table_name""",
+        (schema,),
     )
     for r in cur.fetchall():
         print(f"  {r['table_name']}")

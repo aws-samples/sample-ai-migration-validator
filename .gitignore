@@ -51,3 +51,7 @@ config.yaml
 *.pem
 *.key
 secrets/
+bandit_results.json
+bandit_scripts_results.json
+pip_audit_results.json
+NOTICE

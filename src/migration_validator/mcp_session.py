@@ -226,6 +226,7 @@ class MCPSessionManager:
                 "SQLSERVER_USERNAME": details.username,
                 "SQLSERVER_PASSWORD": details.password.get_secret_value(),
                 "SQLSERVER_ENCRYPT": "yes" if details.encrypt else "no",
+                "SQLSERVER_ALLOWED_SCHEMA": details.schema_name,
             }
         elif details.engine == "postgresql":
             module = "mcp_servers.postgres_mcp.server"
@@ -236,6 +237,7 @@ class MCPSessionManager:
                 "PG_USERNAME": details.username,
                 "PG_PASSWORD": details.password.get_secret_value(),
                 "PG_SSLMODE": "require" if details.encrypt else "prefer",
+                "PG_ALLOWED_SCHEMA": details.schema_name,
             }
         else:
             raise ValueError(f"Unsupported engine: {details.engine}")

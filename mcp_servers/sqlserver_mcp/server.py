@@ -110,9 +110,32 @@ def _safe_ident(s: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _check_schema_allowlist(sql: str) -> str | None:
+    """If SQLSERVER_ALLOWED_SCHEMA is set, reject queries referencing other schemas.
+
+    This is defense-in-depth — the primary access control is the DB user's grants.
+    Returns an error message string if rejected, or None if OK.
+    """
+    import re as _re
+
+    allowed = os.environ.get("SQLSERVER_ALLOWED_SCHEMA", "").strip()
+    if not allowed:
+        return None
+    # Match FROM/JOIN [schema].[table] or schema.table patterns
+    pattern = r"(?:FROM|JOIN)\s+\[?(\w+)\]?\s*\.\s*\[?\w+\]?"
+    refs = _re.findall(pattern, sql, flags=_re.IGNORECASE)
+    for ref in refs:
+        if ref.lower() != allowed.lower():
+            return f"Query references schema '{ref}' which is not in the allowed list ('{allowed}')"
+    return None
+
+
 @mcp.tool()
 def execute_select(sql: str) -> str:
     """Execute a read-only SQL Server query and return JSON-formatted rows."""
+    schema_err = _check_schema_allowlist(sql)
+    if schema_err:
+        return json.dumps({"error": "rejected", "reason": schema_err})
     try:
         rows = _query(sql)
     except UnsafeStatementError as e:
@@ -191,43 +214,42 @@ def list_objects(schema: str) -> str:
     """
     if not _valid_ident(schema):
         return json.dumps({"error": "rejected", "reason": "invalid schema identifier"})
-    sl = _q_lit(schema)
-    sql = f"""
+    sql = """
         SELECT 'USER_TABLE' AS type_desc, table_name AS name
           FROM INFORMATION_SCHEMA.TABLES
-         WHERE table_schema = {sl} AND table_type = 'BASE TABLE'
+         WHERE table_schema = %s AND table_type = 'BASE TABLE'
         UNION ALL
         SELECT 'VIEW', table_name
           FROM INFORMATION_SCHEMA.VIEWS
-         WHERE table_schema = {sl}
+         WHERE table_schema = %s
         UNION ALL
         SELECT CASE WHEN routine_type = 'PROCEDURE'
                     THEN 'SQL_STORED_PROCEDURE'
                     ELSE 'SQL_SCALAR_FUNCTION' END,
                routine_name
           FROM INFORMATION_SCHEMA.ROUTINES
-         WHERE routine_schema = {sl}
+         WHERE routine_schema = %s
         UNION ALL
         SELECT 'SQL_TRIGGER', tr.name
           FROM sys.triggers tr
           JOIN sys.tables t ON tr.parent_id = t.object_id
           JOIN sys.schemas s ON s.schema_id = t.schema_id
-         WHERE s.name = {sl}
+         WHERE s.name = %s
         UNION ALL
         SELECT 'INDEX', i.name
           FROM sys.indexes i
           JOIN sys.tables t ON t.object_id = i.object_id
           JOIN sys.schemas s ON s.schema_id = t.schema_id
-         WHERE s.name = {sl}
+         WHERE s.name = %s
            AND i.is_primary_key = 0 AND i.is_unique_constraint = 0
            AND i.name IS NOT NULL
         UNION ALL
         SELECT 'SEQUENCE_OBJECT', sq.name
           FROM sys.sequences sq
           JOIN sys.schemas s ON s.schema_id = sq.schema_id
-         WHERE s.name = {sl}
+         WHERE s.name = %s
     """
-    return json.dumps(_query(sql), default=str)
+    return json.dumps(_query(sql, (schema,) * 6), default=str)
 
 
 @mcp.tool()
@@ -239,25 +261,25 @@ def table_row_counts(schema: str) -> str:
     """
     if not _valid_ident(schema):
         return json.dumps({"error": "rejected", "reason": "invalid schema identifier"})
-    sl = _q_lit(schema)
     sq = _q_ident(schema)
-    fast_sql = f"""
+    fast_sql = """
         SELECT  t.name AS table_name,
                 SUM(CASE WHEN p.index_id IN (0,1) THEN p.row_count ELSE 0 END) AS row_count
           FROM  sys.dm_db_partition_stats p
           JOIN  sys.tables  t ON t.object_id = p.object_id
           JOIN  sys.schemas s ON s.schema_id = t.schema_id
-         WHERE  s.name = {sl}
+         WHERE  s.name = %s
          GROUP BY t.name
          ORDER BY t.name
     """
-    rows = _query(fast_sql)
+    rows = _query(fast_sql, (schema,))
     if rows:
         return json.dumps(rows, default=str)
     tables = _query(
-        f"""SELECT table_name FROM INFORMATION_SCHEMA.TABLES
-            WHERE table_schema = {sl} AND table_type = 'BASE TABLE'
-            ORDER BY table_name"""
+        """SELECT table_name FROM INFORMATION_SCHEMA.TABLES
+            WHERE table_schema = %s AND table_type = 'BASE TABLE'
+            ORDER BY table_name""",
+        (schema,),
     )
     out: list[dict[str, Any]] = []
     for r in tables:
@@ -274,18 +296,17 @@ def list_procedures(schema: str) -> str:
     """List stored procedures and functions in the schema with their definition."""
     if not _valid_ident(schema):
         return json.dumps({"error": "rejected", "reason": "invalid schema identifier"})
-    sl = _q_lit(schema)
-    sql = f"""
+    sql = """
         SELECT  o.name,
                 o.type_desc,
                 CAST(OBJECT_DEFINITION(o.object_id) AS NVARCHAR(MAX)) AS definition
           FROM  sys.objects o
           JOIN  sys.schemas s ON s.schema_id = o.schema_id
-         WHERE  s.name = {sl}
+         WHERE  s.name = %s
            AND  o.type IN ('P','FN','IF','TF')
          ORDER BY o.name
     """
-    return json.dumps(_query(sql), default=str)
+    return json.dumps(_query(sql, (schema,)), default=str)
 
 
 @mcp.tool()
@@ -293,9 +314,7 @@ def procedure_parameters(schema: str, name: str) -> str:
     """Parameter metadata for a procedure or function."""
     if not _valid_ident(schema) or not _valid_ident(name):
         return json.dumps({"error": "rejected", "reason": "invalid identifier"})
-    sl_schema = _q_lit(schema)
-    sl_name = _q_lit(name)
-    sql = f"""
+    sql = """
         SELECT  p.name              AS parameter_name,
                 t.name              AS data_type,
                 p.parameter_id      AS ordinal,
@@ -305,10 +324,10 @@ def procedure_parameters(schema: str, name: str) -> str:
           JOIN  sys.types t   ON t.user_type_id = p.user_type_id
           JOIN  sys.objects o ON o.object_id   = p.object_id
           JOIN  sys.schemas sc ON sc.schema_id = o.schema_id
-         WHERE  sc.name = {sl_schema} AND o.name = {sl_name}
+         WHERE  sc.name = %s AND o.name = %s
          ORDER BY p.parameter_id
     """
-    return json.dumps(_query(sql), default=str)
+    return json.dumps(_query(sql, (schema, name)), default=str)
 
 
 @mcp.tool()
@@ -335,11 +354,11 @@ def find_columns(schema: str, column_name: str) -> str:
     sql = (
         "SELECT table_name, column_name, data_type "
         "FROM INFORMATION_SCHEMA.COLUMNS "
-        f"WHERE table_schema = {_q_lit(schema)} "
-        f"  AND LOWER(column_name) = LOWER({_q_lit(column_name)}) "
+        "WHERE table_schema = %s "
+        "  AND LOWER(column_name) = LOWER(%s) "
         "ORDER BY table_name"
     )
-    return json.dumps(_query(sql), default=str)
+    return json.dumps(_query(sql, (schema, column_name)), default=str)
 
 
 @mcp.tool()
@@ -390,7 +409,8 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
     meta = _query(
         "SELECT o.type_desc, OBJECT_DEFINITION(o.object_id) AS definition "
         "FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id "
-        f"WHERE s.name = {_q_lit(schema)} AND o.name = {_q_lit(name)}"
+        "WHERE s.name = %s AND o.name = %s",
+        (schema, name),
     )
     if not meta:
         return json.dumps({"error": "not_found", "reason": f"{schema}.{name}"})
@@ -491,7 +511,8 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
     meta = _query(
         "SELECT o.type_desc, OBJECT_DEFINITION(o.object_id) AS definition "
         "FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id "
-        f"WHERE s.name = {_q_lit(schema)} AND o.name = {_q_lit(name)}"
+        "WHERE s.name = %s AND o.name = %s",
+        (schema, name),
     )
     if not meta:
         return json.dumps({"error": "not_found", "reason": f"{schema}.{name}"})
