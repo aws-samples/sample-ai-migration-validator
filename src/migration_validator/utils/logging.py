@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """Centralised logging that scrubs secrets out of every record.
 
 Anything that looks like a password / connection-string fragment is replaced

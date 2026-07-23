@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """Pure-logic tests of the four agents (no DB, no LLM, no real MCP).
 
 We patch ``BaseAgent.call_json`` to feed canned MCP-tool responses so we can

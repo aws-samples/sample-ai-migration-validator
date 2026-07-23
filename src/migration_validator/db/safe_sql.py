@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """Defense-in-depth statement guard.
 
 The MCP servers each apply this same check. We re-apply it on the client side

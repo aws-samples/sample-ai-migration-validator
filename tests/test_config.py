@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """Configuration loading tests (no AWS / no DB required)."""
 
 from __future__ import annotations

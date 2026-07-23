@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """Phase 2 — Row-Count Reconciliation.
 
 Pulls per-table row counts from each side using the ``table_row_counts`` MCP

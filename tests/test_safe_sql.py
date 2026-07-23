@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """The read-only guard is the single most important safety control. Test thoroughly."""
 
 from __future__ import annotations

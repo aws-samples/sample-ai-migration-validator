@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """End-to-end probe: launch the validator's SQL Server MCP server and ask it
 for database info, list_objects, and table_row_counts.
 

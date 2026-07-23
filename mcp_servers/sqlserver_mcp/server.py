@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """Read-only SQL Server MCP server (pure Python, no ODBC required).
 
 Uses ``python-tds`` so the validator works on a fresh machine without any

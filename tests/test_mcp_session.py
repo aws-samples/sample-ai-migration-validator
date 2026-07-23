@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """Tests for ``MCPSessionManager`` reuse semantics and lifecycle.
 
 We don't actually start a server subprocess here — that requires real DBs.

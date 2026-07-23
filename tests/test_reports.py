@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """Smoke tests for the HTML and JSON report renderers."""
 
 from __future__ import annotations

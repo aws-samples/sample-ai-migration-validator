@@ -1,3 +1,6 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
 """Strands-based specialist agents."""
 
 from .functional_agent import FunctionalTestingAgent
