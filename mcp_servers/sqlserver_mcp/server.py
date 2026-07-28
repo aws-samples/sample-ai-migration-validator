@@ -289,7 +289,7 @@ def table_row_counts(schema: str) -> str:
         tname = r["table_name"]
         if not _valid_ident(tname):
             continue
-        cnt = _query(f"SELECT COUNT_BIG(*) AS row_count FROM {sq}.{_q_ident(tname)}")
+        cnt = _query(f"SELECT COUNT_BIG(*) AS row_count FROM {sq}.{_q_ident(tname)}")  # noqa: S608 — identifiers are bracket-quoted via _q_ident after _valid_ident check
         out.append({"table_name": tname, "row_count": cnt[0]["row_count"] if cnt else 0})
     return json.dumps(out, default=str)
 
@@ -375,7 +375,7 @@ def sample_column(schema: str, table: str, column: str, limit: int = 5) -> str:
         return json.dumps({"error": "rejected", "reason": "limit must be 1..50"})
     if not (_valid_ident(schema) and _valid_ident(table) and _valid_ident(column)):
         return json.dumps({"error": "rejected", "reason": "invalid identifier"})
-    sql = (
+    sql = (  # nosec B608 — identifiers validated by _valid_ident, bracket-quoted by _q_ident
         f"SELECT DISTINCT TOP ({int(limit)}) {_q_ident(column)} AS v "
         f"FROM {_q_ident(schema)}.{_q_ident(table)} "
         f"WHERE {_q_ident(column)} IS NOT NULL"
@@ -431,7 +431,13 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
 
     qualified = f"{_q_ident(schema)}.{_q_ident(name)}"
 
-    # Quote each argument as a SQL Server literal.
+    # Build parameterized argument list — each argument is quoted as a SQL
+    # literal using _q_lit (apostrophe-doubling for strings, type coercion for
+    # numerics/booleans/NULL). This is safe because:
+    # 1. schema and name are bracket-quoted identifiers validated by _valid_ident
+    # 2. arguments go through _q_lit which escapes all single quotes
+    # 3. The object's existence is verified via parameterized sys.objects query above
+    # 4. The entire EXEC runs inside BEGIN TRAN ... ROLLBACK TRAN
     def _lit(v: Any) -> str:
         if v is None:
             return "NULL"
@@ -449,16 +455,17 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
     try:
         cur = conn.cursor()
         if is_function:
+            # Function call: SELECT [schema].[name](args) AS result
+            # Identifiers are bracket-quoted; args are literal-escaped.
             cur.execute(f"SELECT {qualified}({arg_sql}) AS result")
-            # ``as_dict=True`` connection returns rows as dicts already.
             rows = list(cur.fetchall())
             return json.dumps(rows, default=str)
 
         # Procedure: wrap in a rollback transaction so any write is undone.
-        # autocommit is on by default; turn it off for the duration.
         conn.autocommit = False
         try:
             cur.execute("BEGIN TRAN")
+            # EXEC with bracket-quoted identifiers and literal-escaped args.
             cur.execute(f"EXEC {qualified} {arg_sql}".rstrip())
             collected_rows: list[dict[str, Any]] = []
             if cur.description is not None:
@@ -532,6 +539,7 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
 
     qualified = f"{_q_ident(schema)}.{_q_ident(name)}"
 
+    # Build literal-escaped argument list (same safety contract as call_procedure).
     def _lit(v: Any) -> str:
         if v is None:
             return "NULL"

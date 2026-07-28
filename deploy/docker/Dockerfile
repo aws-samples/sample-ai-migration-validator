@@ -6,7 +6,7 @@
 
 ARG PYTHON_VERSION=3.12
 
-FROM python:${PYTHON_VERSION}-slim-bookworm AS builder
+FROM public.ecr.aws/docker/library/python:${PYTHON_VERSION}-slim-bookworm AS builder
 
 ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -26,7 +26,7 @@ RUN pip install --upgrade pip \
  && pip install --target /opt/python-deps .
 
 # -----------------------------------------------------------------------------
-FROM python:${PYTHON_VERSION}-slim-bookworm AS runtime
+FROM public.ecr.aws/docker/library/python:${PYTHON_VERSION}-slim-bookworm AS runtime
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

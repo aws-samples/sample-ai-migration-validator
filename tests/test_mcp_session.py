@@ -25,7 +25,7 @@ def _details(role: str, host: str = "h", database: str = "d") -> ConnectionDetai
         port=port,
         database=database,
         username="u",
-        password="p",
+        password="test-fixture-value",  # nosec B106 — test fixture, not a real credential
         schema_name="dbo" if engine == "sqlserver" else "public",
     )
 
@@ -95,7 +95,7 @@ def test_fingerprint_excludes_password() -> None:
         port=1433,
         database="d",
         username="u",
-        password="one",
+        password="test-password-alpha",  # nosec B106 — test fixture
     )
     b = ConnectionDetails(
         engine="sqlserver",
@@ -103,7 +103,7 @@ def test_fingerprint_excludes_password() -> None:
         port=1433,
         database="d",
         username="u",
-        password="two",  # different password, same target
+        password="test-password-beta",  # nosec B106 — test fixture, different password same target
     )
     # Two passwords, same connection target → same fingerprint, same MCP.
     assert MCPFingerprint.of(a) == MCPFingerprint.of(b)

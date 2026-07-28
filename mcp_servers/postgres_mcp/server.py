@@ -421,6 +421,12 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
         return declared
 
     qualified = f"{_q_ident(schema)}.{_q_ident(name)}"
+    # SECURITY NOTE: `qualified` uses _q_ident (double-quote wrapping) on
+    # schema and name which were validated by _valid_ident above (rejects NUL,
+    # double-quote chars, and names >63 chars). User-supplied argument values
+    # go through psycopg's native %s parameterization (bound list) — they are
+    # NEVER interpolated as raw strings. The only f-string interpolation is for
+    # validated identifiers and typed casts derived from pg_proc metadata.
     placeholders: list[str] = []
     bound: list[Any] = []
     refcursor_positions: list[int] = []
@@ -583,6 +589,8 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
         return declared
 
     qualified = f"{_q_ident(schema)}.{_q_ident(name)}"
+    # SECURITY NOTE: Same parameterization contract as call_procedure —
+    # identifiers are quote-wrapped and validated; args use psycopg %s binding.
     placeholders: list[str] = []
     bound: list[Any] = []
     user_args = list(args)

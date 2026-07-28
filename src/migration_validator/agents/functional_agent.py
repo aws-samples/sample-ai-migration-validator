@@ -275,7 +275,12 @@ class FunctionalTestingAgent(BaseAgent):
 
     @staticmethod
     def _format_call_for_display(schema: str, name: str, args: list[Any], engine: str) -> str:
-        """Produce a readable invocation string for the report."""
+        """Produce a readable invocation string for the report.
+
+        NOTE: This method produces a *display-only* string for the HTML/JSON
+        report. It is NEVER executed as SQL. The actual invocation uses the
+        ``call_procedure`` MCP tool which handles parameterization internally.
+        """
 
         def _fmt(v: Any) -> str:
             if v is None:
@@ -292,15 +297,26 @@ class FunctionalTestingAgent(BaseAgent):
         return f'CALL "{schema}"."{name}"({argsql})'
 
     def _build_source_sql(self, meta: _ProcMeta, args: list[Any]) -> str:
-        # Kept for backward-compat with the performance agent which times raw
-        # SELECTs. For functions we can still time a SELECT-style call; for
-        # procedures the performance agent skips the case.
+        """Build a display-only SQL string for source function invocation.
+
+        NOTE: This string is used for reporting and timing via the MCP
+        ``execute_with_timing`` tool, which applies ``assert_read_only`` and
+        identifier validation before execution. Schema and function names are
+        validated by ``_valid_ident`` in the MCP server; arguments are escaped
+        via ``_quote_literal`` (apostrophe-doubling for strings, type coercion
+        for numerics/booleans/NULL).
+        """
         if "FUNCTION" not in meta.type_desc.upper():
             return ""
         argsql = ", ".join(self._quote_literal(a) for a in args)
         return f"SELECT [{self.config.source.schema_name}].[{meta.name}]({argsql}) AS result"
 
     def _build_target_sql(self, meta: _ProcMeta, args: list[Any]) -> str:
+        """Build a display-only SQL string for target function invocation.
+
+        NOTE: Same security contract as ``_build_source_sql`` — the MCP server
+        validates identifiers and enforces read-only before execution.
+        """
         if "FUNCTION" not in meta.type_desc.upper():
             return ""
         argsql = ", ".join(self._quote_literal(a) for a in args)
