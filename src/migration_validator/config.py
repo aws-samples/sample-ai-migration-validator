@@ -43,7 +43,7 @@ class ConnectionDetails(BaseModel):
     def safe_dict(self) -> dict:
         """Return a copy with the password redacted, safe to log."""
         d = self.model_dump()
-        d["password"] = "***"  # noqa: S105 - constant placeholder, not a real password
+        d["password"] = "***"  # nosec B105 - redaction placeholder, not a real password
         return d
 
 

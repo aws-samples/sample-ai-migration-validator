@@ -22,7 +22,7 @@ def _cfg(tmp_path: Path) -> ValidatorConfig:
             port=1433,
             database="d",
             username="u",
-            password="src-secret-marker-9z2",
+            password="src-secret-marker-9z2",  # nosec B106
         ),
         target=ConnectionDetails(
             engine="postgresql",
@@ -30,7 +30,7 @@ def _cfg(tmp_path: Path) -> ValidatorConfig:
             port=5432,
             database="d",
             username="u",
-            password="tgt-secret-marker-9z2",
+            password="tgt-secret-marker-9z2",  # nosec B106
         ),
         report_dir=tmp_path,
     )

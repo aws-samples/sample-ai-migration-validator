@@ -74,6 +74,7 @@ Resources:
       Name: !Sub '${ProjectName}/target'
       Description: PostgreSQL target connection details (populate after stack creation).
       KmsKeyId: alias/aws/secretsmanager
+      KmsKeyId: alias/aws/secretsmanager
       Tags:
         - { Key: Project, Value: !Ref ProjectName }
         - { Key: Role, Value: target }

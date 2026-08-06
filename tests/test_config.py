@@ -25,7 +25,7 @@ def test_safe_dict_redacts_password() -> None:
         port=1433,
         database="d",
         username="u",
-        password="super-secret",
+        password="super-secret",  # nosec B106
     )
     assert c.safe_dict()["password"] == "***"
     # And the secret is still retrievable when needed.
@@ -41,7 +41,7 @@ def test_load_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     data = load_from_env("SOURCE_")
     assert data["port"] == 1433
     assert data["host"] == "h"
-    assert data["password"] == "p"
+    assert data["password"] == "p"  # nosec B105
 
 
 def test_load_yaml_expands_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,19 +107,19 @@ def test_invalid_port_raises() -> None:
             port=99999,
             database="d",
             username="u",
-            password="p",
+            password="test-fixture",  # nosec B106
         )
 
 
 def test_safe_dict_is_json_serialisable() -> None:
-    distinctive_password = "x9z2q-secret-marker"
+    distinctive_password = "x9z2q-secret-marker"  # nosec B105
     c = ConnectionDetails(
         engine="postgresql",
         host="h",
         port=5432,
         database="d",
         username="u",
-        password=distinctive_password,
+        password=distinctive_password,  # nosec B106
     )
     # Important: the redacted dict goes into HTML/JSON reports.
     rendered = json.dumps(c.safe_dict())

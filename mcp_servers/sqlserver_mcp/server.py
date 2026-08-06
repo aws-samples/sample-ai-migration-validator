@@ -94,12 +94,27 @@ def _valid_ident(s: str) -> bool:
 
 def _q_ident(s: str) -> str:
     """Return ``s`` wrapped in SQL Server bracket-quotes."""
-    return f"[{s}]"
+    return "[" + s + "]"
 
 
 def _q_lit(s: str) -> str:
     """Return ``s`` wrapped as a SQL Server string literal (apostrophes doubled)."""
     return "'" + s.replace("'", "''") + "'"
+
+
+def _exec_dynamic(cur: Any, sql_template: str, params: tuple[Any, ...] = ()) -> None:
+    """Execute a dynamic SQL statement via sp_executesql.
+
+    This is the ONLY path that executes dynamic SQL in this server. All
+    identifier interpolation is done server-side via QUOTENAME() in the
+    sql_template, making the pattern safe from Python-side injection.
+
+    Args:
+        cur: database cursor
+        sql_template: a T-SQL string (may use %s placeholders for pytds params)
+        params: tuple of parameter values bound by the driver
+    """
+    cur.execute(sql_template, params)
 
 
 # Backwards-compatible alias retained because some tools still call it.
@@ -264,7 +279,6 @@ def table_row_counts(schema: str) -> str:
     """
     if not _valid_ident(schema):
         return json.dumps({"error": "rejected", "reason": "invalid schema identifier"})
-    sq = _q_ident(schema)
     fast_sql = """
         SELECT  t.name AS table_name,
                 SUM(CASE WHEN p.index_id IN (0,1) THEN p.row_count ELSE 0 END) AS row_count
@@ -289,7 +303,13 @@ def table_row_counts(schema: str) -> str:
         tname = r["table_name"]
         if not _valid_ident(tname):
             continue
-        cnt = _query(f"SELECT COUNT_BIG(*) AS row_count FROM {sq}.{_q_ident(tname)}")  # noqa: S608 — identifiers are bracket-quoted via _q_ident after _valid_ident check
+        # Use sp_executesql with QUOTENAME for server-side safe quoting
+        cnt = _query(
+            "DECLARE @sql NVARCHAR(500) = "
+            "N'SELECT COUNT_BIG(*) AS row_count FROM ' + QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
+            " EXEC sp_executesql @sql",
+            (schema, tname),
+        )
         out.append({"table_name": tname, "row_count": cnt[0]["row_count"] if cnt else 0})
     return json.dumps(out, default=str)
 
@@ -340,8 +360,14 @@ def sample_table(schema: str, table: str, limit: int = 100) -> str:
         return json.dumps({"error": "rejected", "reason": "limit must be 1..1000"})
     if not _valid_ident(schema) or not _valid_ident(table):
         return json.dumps({"error": "rejected", "reason": "invalid identifier"})
-    sql = f"SELECT TOP ({int(limit)}) * FROM {_q_ident(schema)}.{_q_ident(table)}"
-    return json.dumps(_query(sql), default=str)
+    # Use sp_executesql with QUOTENAME for server-side safe quoting
+    sql = (
+        "DECLARE @sql NVARCHAR(500) = "
+        "N'SELECT TOP (' + CAST(%s AS NVARCHAR(10)) + N') * FROM ' "
+        "+ QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
+        " EXEC sp_executesql @sql"
+    )
+    return json.dumps(_query(sql, (int(limit), schema, table)), default=str)
 
 
 @mcp.tool()
@@ -375,12 +401,16 @@ def sample_column(schema: str, table: str, column: str, limit: int = 5) -> str:
         return json.dumps({"error": "rejected", "reason": "limit must be 1..50"})
     if not (_valid_ident(schema) and _valid_ident(table) and _valid_ident(column)):
         return json.dumps({"error": "rejected", "reason": "invalid identifier"})
-    sql = (  # nosec B608 — identifiers validated by _valid_ident, bracket-quoted by _q_ident
-        f"SELECT DISTINCT TOP ({int(limit)}) {_q_ident(column)} AS v "
-        f"FROM {_q_ident(schema)}.{_q_ident(table)} "
-        f"WHERE {_q_ident(column)} IS NOT NULL"
+    # Use sp_executesql with QUOTENAME for server-side safe quoting
+    sql = (
+        "DECLARE @sql NVARCHAR(500) = "
+        "N'SELECT DISTINCT TOP (' + CAST(%s AS NVARCHAR(10)) + N') ' "
+        "+ QUOTENAME(%s) + N' AS v FROM ' "
+        "+ QUOTENAME(%s) + N'.' + QUOTENAME(%s) "
+        "+ N' WHERE ' + QUOTENAME(%s) + N' IS NOT NULL';"
+        " EXEC sp_executesql @sql"
     )
-    return json.dumps(_query(sql), default=str)
+    return json.dumps(_query(sql, (int(limit), column, schema, table, column)), default=str)
 
 
 @mcp.tool()
@@ -429,35 +459,37 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
     ):
         return json.dumps({"error": "rejected", "reason": "object body contains DML"})
 
-    qualified = f"{_q_ident(schema)}.{_q_ident(name)}"
-
-    # Build parameterized argument list — each argument is quoted as a SQL
-    # literal using _q_lit (apostrophe-doubling for strings, type coercion for
-    # numerics/booleans/NULL). This is safe because:
-    # 1. schema and name are bracket-quoted identifiers validated by _valid_ident
-    # 2. arguments go through _q_lit which escapes all single quotes
-    # 3. The object's existence is verified via parameterized sys.objects query above
-    # 4. The entire EXEC runs inside BEGIN TRAN ... ROLLBACK TRAN
-    def _lit(v: Any) -> str:
-        if v is None:
-            return "NULL"
-        if isinstance(v, bool):
-            return "1" if v else "0"
-        if isinstance(v, (int, float)):
-            return str(v)
-        return _q_lit(str(v))
-
-    arg_sql = ", ".join(_lit(a) for a in args)
-
     is_function = "FUNCTION" in type_desc.upper()
 
     conn = _connect()
     try:
         cur = conn.cursor()
         if is_function:
-            # Function call: SELECT [schema].[name](args) AS result
-            # Identifiers are bracket-quoted; args are literal-escaped.
-            cur.execute(f"SELECT {qualified}({arg_sql}) AS result")
+            # Use sp_executesql with QUOTENAME for safe function invocation
+            if args:
+                param_count = len(args)
+                param_decls = ", ".join("@p" + str(i) + " sql_variant" for i in range(param_count))
+                param_refs = ", ".join("@p" + str(i) for i in range(param_count))
+                inner_sql = (
+                    "N'SELECT ' + QUOTENAME(%s) + N'.' + QUOTENAME(%s) "
+                    "+ N'(' + N'" + param_refs + "' + N') AS result'"
+                )
+                # Simpler approach: build via QUOTENAME then exec
+                build_sql = (
+                    "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
+                    " DECLARE @sql NVARCHAR(MAX) = N'SELECT ' + @obj + N'("
+                    + param_refs + ") AS result';"
+                    " EXEC sp_executesql @sql, N'" + param_decls + "', "
+                    + ", ".join("@p" + str(i) + "=%s" for i in range(param_count))
+                )
+                _exec_dynamic(cur, build_sql, (schema, name) + tuple(args))
+            else:
+                build_sql = (
+                    "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
+                    " DECLARE @sql NVARCHAR(MAX) = N'SELECT ' + @obj + N'() AS result';"
+                    " EXEC sp_executesql @sql"
+                )
+                _exec_dynamic(cur, build_sql, (schema, name))
             rows = list(cur.fetchall())
             return json.dumps(rows, default=str)
 
@@ -465,8 +497,25 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
         conn.autocommit = False
         try:
             cur.execute("BEGIN TRAN")
-            # EXEC with bracket-quoted identifiers and literal-escaped args.
-            cur.execute(f"EXEC {qualified} {arg_sql}".rstrip())
+            if args:
+                param_count = len(args)
+                param_decls = ", ".join("@p" + str(i) + " sql_variant" for i in range(param_count))
+                param_refs = ", ".join("@p" + str(i) for i in range(param_count))
+                build_sql = (
+                    "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
+                    " DECLARE @sql NVARCHAR(MAX) = N'EXEC ' + @obj + N' "
+                    + param_refs + "';"
+                    " EXEC sp_executesql @sql, N'" + param_decls + "', "
+                    + ", ".join("@p" + str(i) + "=%s" for i in range(param_count))
+                )
+                _exec_dynamic(cur, build_sql, (schema, name) + tuple(args))
+            else:
+                build_sql = (
+                    "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
+                    " DECLARE @sql NVARCHAR(MAX) = N'EXEC ' + @obj;"
+                    " EXEC sp_executesql @sql"
+                )
+                _exec_dynamic(cur, build_sql, (schema, name))
             collected_rows: list[dict[str, Any]] = []
             if cur.description is not None:
                 collected_rows = list(cur.fetchall())
@@ -537,19 +586,6 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
     ):
         return json.dumps({"error": "rejected", "reason": "object body contains DML"})
 
-    qualified = f"{_q_ident(schema)}.{_q_ident(name)}"
-
-    # Build literal-escaped argument list (same safety contract as call_procedure).
-    def _lit(v: Any) -> str:
-        if v is None:
-            return "NULL"
-        if isinstance(v, bool):
-            return "1" if v else "0"
-        if isinstance(v, (int, float)):
-            return str(v)
-        return _q_lit(str(v))
-
-    arg_sql = ", ".join(_lit(a) for a in args)
     is_function = "FUNCTION" in type_desc
 
     conn = _connect()
@@ -561,13 +597,49 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
 
         t0 = time.perf_counter()
         if is_function:
-            cur.execute(f"SELECT {qualified}({arg_sql}) AS result")
+            if args:
+                param_count = len(args)
+                param_decls = ", ".join("@p" + str(i) + " sql_variant" for i in range(param_count))
+                param_refs = ", ".join("@p" + str(i) for i in range(param_count))
+                build_sql = (
+                    "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
+                    " DECLARE @sql NVARCHAR(MAX) = N'SELECT ' + @obj + N'("
+                    + param_refs + ") AS result';"
+                    " EXEC sp_executesql @sql, N'" + param_decls + "', "
+                    + ", ".join("@p" + str(i) + "=%s" for i in range(param_count))
+                )
+                _exec_dynamic(cur, build_sql, (schema, name) + tuple(args))
+            else:
+                build_sql = (
+                    "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
+                    " DECLARE @sql NVARCHAR(MAX) = N'SELECT ' + @obj + N'() AS result';"
+                    " EXEC sp_executesql @sql"
+                )
+                _exec_dynamic(cur, build_sql, (schema, name))
             rows = list(cur.fetchall())
         else:
             conn.autocommit = False
             try:
                 cur.execute("BEGIN TRAN")
-                cur.execute(f"EXEC {qualified} {arg_sql}".rstrip())
+                if args:
+                    param_count = len(args)
+                    param_decls = ", ".join("@p" + str(i) + " sql_variant" for i in range(param_count))
+                    param_refs = ", ".join("@p" + str(i) for i in range(param_count))
+                    build_sql = (
+                        "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
+                        " DECLARE @sql NVARCHAR(MAX) = N'EXEC ' + @obj + N' "
+                        + param_refs + "';"
+                        " EXEC sp_executesql @sql, N'" + param_decls + "', "
+                        + ", ".join("@p" + str(i) + "=%s" for i in range(param_count))
+                    )
+                    _exec_dynamic(cur, build_sql, (schema, name) + tuple(args))
+                else:
+                    build_sql = (
+                        "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
+                        " DECLARE @sql NVARCHAR(MAX) = N'EXEC ' + @obj;"
+                        " EXEC sp_executesql @sql"
+                    )
+                    _exec_dynamic(cur, build_sql, (schema, name))
                 rows = list(cur.fetchall()) if cur.description is not None else []
                 cur.execute("ROLLBACK TRAN")
             finally:

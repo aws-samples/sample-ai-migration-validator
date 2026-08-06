@@ -27,7 +27,7 @@ def _cfg() -> ValidatorConfig:
             port=1433,
             database="d",
             username="u",
-            password="p",
+            password="test-fixture",  # nosec B106
         ),
         target=ConnectionDetails(
             engine="postgresql",
@@ -35,7 +35,7 @@ def _cfg() -> ValidatorConfig:
             port=5432,
             database="d",
             username="u",
-            password="p",
+            password="test-fixture",  # nosec B106
         ),
     )
 
