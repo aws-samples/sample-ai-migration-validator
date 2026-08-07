@@ -42,7 +42,7 @@ htmlcov/
 .DS_Store
 
 # Project artifacts
-reports/
+/reports/
 config.yaml
 .env
 *.log

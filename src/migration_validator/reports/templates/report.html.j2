@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Migration Validation Report — {{ generated_at }}</title>
+<style>
+  :root {
+    --ok: #1f7a1f;
+    --warn: #b07b00;
+    --fail: #b00020;
+    --extra: #b07b00;
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --border: #e1e4e8;
+    --text: #1f2328;
+    --muted: #57606a;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--text); margin: 0; padding: 2rem; }
+  h1 { margin: 0 0 0.5rem; }
+  .meta { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+  .config { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem;
+            background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+            padding: 1rem; margin-bottom: 1.5rem; }
+  .config h3 { margin: 0 0 0.5rem; font-size: 0.95rem; }
+  .config dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 0.25rem 0.75rem; font-size: 0.9rem; }
+  .config dt { color: var(--muted); }
+  .phase { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+           padding: 1rem 1.25rem; margin-bottom: 1.25rem; }
+  .phase header { display: flex; justify-content: space-between; align-items: baseline; }
+  .phase h2 { margin: 0; font-size: 1.15rem; }
+  .badge { display: inline-block; padding: 0.15rem 0.55rem; border-radius: 999px; font-size: 0.78rem;
+           font-weight: 600; color: white; }
+  .badge.ok { background: var(--ok); }
+  .badge.warn { background: var(--warn); }
+  .badge.fail { background: var(--fail); }
+  .summary { color: var(--muted); margin: 0.4rem 0 0.9rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  th, td { padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); text-align: left;
+           vertical-align: top; word-break: break-word; }
+  th { background: #f0f2f5; position: sticky; top: 0; }
+  tr:hover td { background: #fafbfc; }
+  .pill { display: inline-block; padding: 0.05rem 0.45rem; border-radius: 4px; font-size: 0.78rem; }
+  .pill.match    { background: #e3f5e3; color: var(--ok); }
+  .pill.mismatch { background: #fde2e4; color: var(--fail); }
+  .pill.missing_in_target { background: #fde2e4; color: var(--fail); }
+  .pill.extra_in_target   { background: #fdf3d9; color: var(--extra); }
+  .pill.skipped { background: #eef0f2; color: var(--muted); }
+  .pill.unsupported { background: #eef0f2; color: var(--muted); }
+  .pill.executed { background: #e6f0ff; color: #1f4eb8; }
+  .nowrap { white-space: nowrap; }
+  details > summary { cursor: pointer; color: var(--muted); }
+  code { background: #f5f6f7; padding: 0.05rem 0.35rem; border-radius: 4px; font-size: 0.82rem; }
+  .toolbar { margin-bottom: 1rem; }
+  .toolbar button { margin-right: 0.5rem; padding: 0.4rem 0.8rem; border: 1px solid var(--border);
+                    background: white; border-radius: 6px; cursor: pointer; }
+  @media print { .toolbar { display: none; } body { background: white; padding: 0.5rem; } }
+</style>
+</head>
+<body>
+  <h1>SQL Server → PostgreSQL Migration Validation Report</h1>
+  <div class="meta">Generated {{ generated_at }} (UTC) · model {{ config.bedrock_model }}{% if config.bedrock_guardrail_id %} · guardrail {{ config.bedrock_guardrail_id }}{% endif %}</div>
+
+  {% if redaction_applied %}
+  <div style="border: 1px solid #f4c542; background: #fff8e1; color: #6a4c00;
+              padding: 0.6rem 0.9rem; border-radius: 6px; margin-bottom: 1rem;
+              font-size: 0.88rem;">
+    <strong>PII redaction is on.</strong>
+    Common patterns (email, phone, SSN, credit card, IBAN, IP, private keys)
+    have been replaced with <code>[REDACTED:...]</code> in test cases, results,
+    and notes. This is best-effort — review the report manually before sharing
+    if your data may contain unusual identifiers (internal account numbers, etc.).
+    To disable, re-run with <code>--no-redact-pii</code>.
+  </div>
+  {% endif %}
+
+  <div class="toolbar">
+    <button onclick="window.print()">Print / Save as PDF</button>
+    <a download="{{ json_filename }}" href="{{ json_filename }}"><button>Download JSON</button></a>
+  </div>
+
+  <section class="config">
+    <div>
+      <h3>Source (SQL Server)</h3>
+      <dl>
+        <dt>Host</dt><dd>{{ config.source.host }}:{{ config.source.port }}</dd>
+        <dt>Database</dt><dd>{{ config.source.database }}</dd>
+        <dt>Schema</dt><dd>{{ config.source.schema_name }}</dd>
+        <dt>User</dt><dd>{{ config.source.username }}</dd>
+        <dt>TLS</dt><dd>{{ "yes" if config.source.encrypt else "no" }}</dd>
+      </dl>
+    </div>
+    <div>
+      <h3>Target (PostgreSQL)</h3>
+      <dl>
+        <dt>Host</dt><dd>{{ config.target.host }}:{{ config.target.port }}</dd>
+        <dt>Database</dt><dd>{{ config.target.database }}</dd>
+        <dt>Schema</dt><dd>{{ config.target.schema_name }}</dd>
+        <dt>User</dt><dd>{{ config.target.username }}</dd>
+        <dt>TLS</dt><dd>{{ "yes" if config.target.encrypt else "no" }}</dd>
+      </dl>
+    </div>
+  </section>
+
+  {% for phase in phases %}
+  <section class="phase">
+    <header>
+      <h2>{{ loop.index }}. {{ phase.name }}</h2>
+      <span class="badge {{ phase.status }}">{{ phase.status | upper }}</span>
+    </header>
+    <p class="summary">{{ phase.summary }}</p>
+
+    {% if phase.rows %}
+    {% set visible_keys = [] %}
+    {% for k in phase.rows[0].keys() %}{% if not k.startswith('_') %}{% set _ = visible_keys.append(k) %}{% endif %}{% endfor %}
+    <table>
+      <thead>
+        <tr>
+        {% for k in visible_keys %}
+          <th>{{ k.replace('_',' ').title() }}</th>
+        {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in phase.rows %}
+          <tr>
+          {% for k in visible_keys %}
+            {% set v = row[k] %}
+            <td>
+              {% if k == 'status' %}
+                <span class="pill {{ v }}">{{ v }}</span>
+              {% elif k == 'category' %}
+                <span class="pill {{ v }}">{{ v }}</span>
+              {% elif k == 'match' %}
+                {% if v is sameas true %}<span class="pill match">match</span>
+                {% elif v is sameas false %}<span class="pill mismatch">differ</span>
+                {% else %}<span class="pill skipped">n/a</span>{% endif %}
+              {% elif k == 'flagged' %}
+                {% if v %}<span class="pill mismatch">flagged</span>
+                {% else %}<span class="pill match">ok</span>{% endif %}
+              {% elif k == 'source_count' %}
+                <span style="color:#1f4eb8;font-weight:600">{{ v }}</span>
+              {% elif k == 'target_count' %}
+                <span style="color:#7d2eb8;font-weight:600">{{ v }}</span>
+              {% elif k == 'details' %}
+                {% set missing = row.get('_missing') or [] %}
+                {% set extra = row.get('_extra') or [] %}
+                {% if missing %}
+                  <div><span class="pill missing_in_target">missing in target</span>
+                  <span style="color:var(--fail)">{{ missing|join(', ') }}</span></div>
+                {% endif %}
+                {% if extra %}
+                  <div style="margin-top:.25rem"><span class="pill extra_in_target">extra in target</span>
+                  <span style="color:var(--extra)">{{ extra|join(', ') }}</span></div>
+                {% endif %}
+                {% if not missing and not extra %}<span style="color:var(--muted)">—</span>{% endif %}
+              {% elif v is mapping or (v is iterable and v is not string) %}
+                <code>{{ v }}</code>
+              {% elif v is none %}
+                <span style="color: var(--muted)">—</span>
+              {% else %}
+                {{ v }}
+              {% endif %}
+            </td>
+          {% endfor %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+  {% endfor %}
+</body>
+</html>
