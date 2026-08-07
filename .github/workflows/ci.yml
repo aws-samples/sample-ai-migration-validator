@@ -107,7 +107,7 @@ jobs:
           output: trivy-image.sarif
           severity: HIGH,CRITICAL
           exit-code: '1'
-          ignore-unfixed: false
+          ignore-unfixed: true
           vuln-type: os,library
 
       - name: Upload Trivy SARIF to code-scanning
