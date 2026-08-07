@@ -59,11 +59,10 @@ def _run_stmt(cur: Any, stmt: Any, params: tuple[Any, ...] = ()) -> None:
     - A psycopg.sql.Composed object (safe by construction via psql.Identifier/Literal)
     - A string constant validated by assert_read_only() before reaching this point
     """
-    run = getattr(cur, "execute")
     if params:
-        run(stmt, params)
+        cur.execute(stmt, params)
     else:
-        run(stmt)
+        cur.execute(stmt)
 
 
 def _query(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
@@ -124,9 +123,7 @@ def _build_count_query(schema: str, table: str) -> psql.Composed:
 
 def _build_sample_column_query(schema: str, table: str, column: str, limit: int) -> psql.Composed:
     """Build a SELECT DISTINCT query using psycopg.sql safe composition."""
-    return psql.SQL(
-        "SELECT DISTINCT {} AS v FROM {}.{} WHERE {} IS NOT NULL LIMIT {}"
-    ).format(
+    return psql.SQL("SELECT DISTINCT {} AS v FROM {}.{} WHERE {} IS NOT NULL LIMIT {}").format(
         psql.Identifier(column),
         psql.Identifier(schema),
         psql.Identifier(table),
@@ -476,7 +473,6 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
             return "varchar"
         return declared
 
-    qualified = _q_ident(schema) + "." + _q_ident(name)
     qualified_sql = psql.SQL("{}.{}").format(psql.Identifier(schema), psql.Identifier(name))
     placeholders: list[str] = []
     bound: list[Any] = []
@@ -506,9 +502,7 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
         with psycopg.connect(_conninfo(), row_factory=dict_row) as conn, conn.cursor() as cur:
             if is_proc:
                 cur.execute("BEGIN")
-                call_stmt = psql.SQL("CALL {}({})").format(
-                    qualified_sql, psql.SQL(placeholder_sql)
-                )
+                call_stmt = psql.SQL("CALL {}({})").format(qualified_sql, psql.SQL(placeholder_sql))
                 _run_stmt(cur, call_stmt, tuple(bound))
 
                 rows: list[dict[str, Any]] = []
@@ -519,9 +513,7 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
                         if not cur_name:
                             continue
                         with conn.cursor(row_factory=dict_row) as fetch_cur:
-                            fetch_stmt = psql.SQL("FETCH ALL FROM {}").format(
-                                psql.Identifier(str(cur_name))
-                            )
+                            fetch_stmt = psql.SQL("FETCH ALL FROM {}").format(psql.Identifier(str(cur_name)))
                             _run_stmt(fetch_cur, fetch_stmt)
                             rows.extend(fetch_cur.fetchall() or [])
                 elif cur.description is not None:
@@ -530,9 +522,7 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
                 return json.dumps(rows, default=str)
 
             cur.execute("SET default_transaction_read_only = on")
-            select_stmt = psql.SQL("SELECT * FROM {}({})").format(
-                qualified_sql, psql.SQL(placeholder_sql)
-            )
+            select_stmt = psql.SQL("SELECT * FROM {}({})").format(qualified_sql, psql.SQL(placeholder_sql))
             _run_stmt(cur, select_stmt, tuple(bound))
             rows = list(cur.fetchall()) if cur.description else []
             return json.dumps(rows, default=str)
@@ -648,7 +638,6 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
             return "varchar"
         return declared
 
-    qualified = _q_ident(schema) + "." + _q_ident(name)
     qualified_sql = psql.SQL("{}.{}").format(psql.Identifier(schema), psql.Identifier(name))
     # SECURITY NOTE: Same parameterization contract as call_procedure —
     # identifiers are quote-wrapped and validated; args use psycopg %s binding.
@@ -681,9 +670,7 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
             t0 = time.perf_counter()
             if is_proc:
                 cur.execute("BEGIN")
-                call_stmt = psql.SQL("CALL {}({})").format(
-                    qualified_sql, psql.SQL(placeholder_sql)
-                )
+                call_stmt = psql.SQL("CALL {}({})").format(qualified_sql, psql.SQL(placeholder_sql))
                 _run_stmt(cur, call_stmt, tuple(bound))
                 rc = 0
                 if cur.description is not None:
@@ -692,9 +679,7 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
                         if not cur_name:
                             continue
                         with conn.cursor(row_factory=dict_row) as fetch_cur:
-                            fetch_stmt = psql.SQL("FETCH ALL FROM {}").format(
-                                psql.Identifier(str(cur_name))
-                            )
+                            fetch_stmt = psql.SQL("FETCH ALL FROM {}").format(psql.Identifier(str(cur_name)))
                             _run_stmt(fetch_cur, fetch_stmt)
                             rc += len(fetch_cur.fetchall() or [])
                 cur.execute("ROLLBACK")

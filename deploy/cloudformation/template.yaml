@@ -52,6 +52,34 @@ Conditions:
 Resources:
 
   # ------------------------------------------------------------------------
+  # KMS CMK for Secrets Manager encryption (CKV_AWS_149)
+  # ------------------------------------------------------------------------
+  SecretsKmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub 'CMK for ${ProjectName} Secrets Manager secrets'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowRootAccountFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+
+  SecretsKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}/secrets'
+      TargetKeyId: !Ref SecretsKmsKey
+
+  # ------------------------------------------------------------------------
   # Secrets Manager scaffolding (always created)
   # ------------------------------------------------------------------------
   SourceSecret:
@@ -61,7 +89,7 @@ Resources:
     Properties:
       Name: !Sub '${ProjectName}/source'
       Description: SQL Server source connection details (populate after stack creation).
-      KmsKeyId: alias/aws/secretsmanager
+      KmsKeyId: !GetAtt SecretsKmsKey.Arn
       Tags:
         - { Key: Project, Value: !Ref ProjectName }
         - { Key: Role, Value: source }
@@ -73,8 +101,7 @@ Resources:
     Properties:
       Name: !Sub '${ProjectName}/target'
       Description: PostgreSQL target connection details (populate after stack creation).
-      KmsKeyId: alias/aws/secretsmanager
-      KmsKeyId: alias/aws/secretsmanager
+      KmsKeyId: !GetAtt SecretsKmsKey.Arn
       Tags:
         - { Key: Project, Value: !Ref ProjectName }
         - { Key: Role, Value: target }
@@ -262,6 +289,12 @@ Resources:
                 Resource:
                   - !Ref SourceSecret
                   - !Ref TargetSecret
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource:
+                  - !GetAtt SecretsKmsKey.Arn
         - PolicyName: InvokeBedrockModel
           PolicyDocument:
             Version: '2012-10-17'
