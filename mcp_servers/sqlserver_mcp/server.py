@@ -470,19 +470,15 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
                 param_count = len(args)
                 param_decls = ", ".join("@p" + str(i) + " sql_variant" for i in range(param_count))
                 param_refs = ", ".join("@p" + str(i) for i in range(param_count))
-                inner_sql = (
-                    "N'SELECT ' + QUOTENAME(%s) + N'.' + QUOTENAME(%s) "
-                    "+ N'(' + N'" + param_refs + "' + N') AS result'"
-                )
-                # Simpler approach: build via QUOTENAME then exec
                 build_sql = (
                     "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
-                    " DECLARE @sql NVARCHAR(MAX) = N'SELECT ' + @obj + N'("
-                    + param_refs + ") AS result';"
-                    " EXEC sp_executesql @sql, N'" + param_decls + "', "
+                    " DECLARE @sql NVARCHAR(MAX) = N'SELECT ' + @obj + N'(" + param_refs + ") AS result';"
+                    " EXEC sp_executesql @sql, N'"
+                    + param_decls
+                    + "', "
                     + ", ".join("@p" + str(i) + "=%s" for i in range(param_count))
                 )
-                _exec_dynamic(cur, build_sql, (schema, name) + tuple(args))
+                _exec_dynamic(cur, build_sql, (schema, name, *tuple(args)))
             else:
                 build_sql = (
                     "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
@@ -503,12 +499,13 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
                 param_refs = ", ".join("@p" + str(i) for i in range(param_count))
                 build_sql = (
                     "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
-                    " DECLARE @sql NVARCHAR(MAX) = N'EXEC ' + @obj + N' "
-                    + param_refs + "';"
-                    " EXEC sp_executesql @sql, N'" + param_decls + "', "
+                    " DECLARE @sql NVARCHAR(MAX) = N'EXEC ' + @obj + N' " + param_refs + "';"
+                    " EXEC sp_executesql @sql, N'"
+                    + param_decls
+                    + "', "
                     + ", ".join("@p" + str(i) + "=%s" for i in range(param_count))
                 )
-                _exec_dynamic(cur, build_sql, (schema, name) + tuple(args))
+                _exec_dynamic(cur, build_sql, (schema, name, *tuple(args)))
             else:
                 build_sql = (
                     "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
@@ -603,12 +600,13 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
                 param_refs = ", ".join("@p" + str(i) for i in range(param_count))
                 build_sql = (
                     "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
-                    " DECLARE @sql NVARCHAR(MAX) = N'SELECT ' + @obj + N'("
-                    + param_refs + ") AS result';"
-                    " EXEC sp_executesql @sql, N'" + param_decls + "', "
+                    " DECLARE @sql NVARCHAR(MAX) = N'SELECT ' + @obj + N'(" + param_refs + ") AS result';"
+                    " EXEC sp_executesql @sql, N'"
+                    + param_decls
+                    + "', "
                     + ", ".join("@p" + str(i) + "=%s" for i in range(param_count))
                 )
-                _exec_dynamic(cur, build_sql, (schema, name) + tuple(args))
+                _exec_dynamic(cur, build_sql, (schema, name, *tuple(args)))
             else:
                 build_sql = (
                     "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
@@ -627,12 +625,13 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
                     param_refs = ", ".join("@p" + str(i) for i in range(param_count))
                     build_sql = (
                         "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
-                        " DECLARE @sql NVARCHAR(MAX) = N'EXEC ' + @obj + N' "
-                        + param_refs + "';"
-                        " EXEC sp_executesql @sql, N'" + param_decls + "', "
+                        " DECLARE @sql NVARCHAR(MAX) = N'EXEC ' + @obj + N' " + param_refs + "';"
+                        " EXEC sp_executesql @sql, N'"
+                        + param_decls
+                        + "', "
                         + ", ".join("@p" + str(i) + "=%s" for i in range(param_count))
                     )
-                    _exec_dynamic(cur, build_sql, (schema, name) + tuple(args))
+                    _exec_dynamic(cur, build_sql, (schema, name, *tuple(args)))
                 else:
                     build_sql = (
                         "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"

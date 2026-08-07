@@ -33,6 +33,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONPATH=/opt/python-deps:/opt/app
 
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends ca-certificates libpq5 tini \
  && rm -rf /var/lib/apt/lists/*
 

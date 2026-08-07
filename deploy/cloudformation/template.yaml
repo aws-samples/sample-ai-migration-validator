@@ -52,6 +52,34 @@ Conditions:
 Resources:
 
   # ------------------------------------------------------------------------
+  # KMS CMK for Secrets Manager encryption (CKV_AWS_149)
+  # ------------------------------------------------------------------------
+  SecretsKmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub 'CMK for ${ProjectName} Secrets Manager secrets'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowRootAccountFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+
+  SecretsKmsKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/${ProjectName}/secrets'
+      TargetKeyId: !Ref SecretsKmsKey
+
+  # ------------------------------------------------------------------------
   # Secrets Manager scaffolding (always created)
   # ------------------------------------------------------------------------
   SourceSecret:
@@ -61,7 +89,7 @@ Resources:
     Properties:
       Name: !Sub '${ProjectName}/source'
       Description: SQL Server source connection details (populate after stack creation).
-      KmsKeyId: alias/aws/secretsmanager
+      KmsKeyId: !GetAtt SecretsKmsKey.Arn
       Tags:
         - { Key: Project, Value: !Ref ProjectName }
         - { Key: Role, Value: source }
@@ -73,8 +101,7 @@ Resources:
     Properties:
       Name: !Sub '${ProjectName}/target'
       Description: PostgreSQL target connection details (populate after stack creation).
-      KmsKeyId: alias/aws/secretsmanager
-      KmsKeyId: alias/aws/secretsmanager
+      KmsKeyId: !GetAtt SecretsKmsKey.Arn
       Tags:
         - { Key: Project, Value: !Ref ProjectName }
         - { Key: Role, Value: target }
@@ -91,6 +118,60 @@ Resources:
       EnableDnsSupport: true
       Tags:
         - { Key: Name, Value: !Sub '${ProjectName}-vpc' }
+        - { Key: Project, Value: !Ref ProjectName }
+
+  VpcFlowLog:
+    Type: AWS::EC2::FlowLog
+    Condition: WantsVpc
+    Properties:
+      ResourceId: !Ref Vpc
+      ResourceType: VPC
+      TrafficType: REJECT
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Sub '/aws/${ProjectName}/vpc-flow-logs'
+      DeliverLogsPermissionArn: !GetAtt FlowLogRole.Arn
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+
+  VpcFlowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: WantsVpc
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W84
+            reason: Flow logs are non-sensitive network metadata; CMK encryption not required for this sample.
+    Properties:
+      LogGroupName: !Sub '/aws/${ProjectName}/vpc-flow-logs'
+      RetentionInDays: 14
+
+  FlowLogRole:
+    Type: AWS::IAM::Role
+    Condition: WantsVpc
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: FlowLogWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/${ProjectName}/vpc-flow-logs*'
+      Tags:
         - { Key: Project, Value: !Ref ProjectName }
 
   SubnetA:
@@ -163,6 +244,11 @@ Resources:
   EndpointSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Condition: WantsVpc
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W5
+            reason: Egress restricted to VPC CIDR for endpoint responses.
     Properties:
       VpcId: !Ref Vpc
       GroupDescription: Inbound HTTPS from validator hosts to PrivateLink endpoints.
@@ -172,6 +258,12 @@ Resources:
           ToPort: 443
           SourceSecurityGroupId: !Ref ValidatorSecurityGroup
           Description: HTTPS from validator host SG.
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: !Ref VpcCidr
+          Description: HTTPS responses within VPC.
       Tags:
         - { Key: Name, Value: !Sub '${ProjectName}-endpoint-sg' }
         - { Key: Project, Value: !Ref ProjectName }
@@ -237,6 +329,11 @@ Resources:
   # ------------------------------------------------------------------------
   ValidatorRole:
     Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: Explicit role name required for cross-stack references and operational clarity.
     Properties:
       RoleName: !Sub '${ProjectName}-role'
       AssumeRolePolicyDocument:
@@ -262,6 +359,12 @@ Resources:
                 Resource:
                   - !Ref SourceSecret
                   - !Ref TargetSecret
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource:
+                  - !GetAtt SecretsKmsKey.Arn
         - PolicyName: InvokeBedrockModel
           PolicyDocument:
             Version: '2012-10-17'
@@ -305,6 +408,40 @@ Resources:
     Properties:
       LogGroupName: !Sub '/aws/${ProjectName}'
       RetentionInDays: 14
+      KmsKeyId: !GetAtt LogsKmsKey.Arn
+
+  LogsKmsKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: !Sub 'CMK for ${ProjectName} CloudWatch Logs encryption'
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowRootAccountFullAccess
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: AllowCloudWatchLogs
+            Effect: Allow
+            Principal:
+              Service: !Sub 'logs.${AWS::Region}.amazonaws.com'
+            Action:
+              - kms:Encrypt*
+              - kms:Decrypt*
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:Describe*
+            Resource: '*'
+            Condition:
+              ArnLike:
+                kms:EncryptionContext:aws:logs:arn: !Sub 'arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/${ProjectName}*'
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
 
 Outputs:
   SourceSecretArn:
