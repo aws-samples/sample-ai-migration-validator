@@ -138,6 +138,11 @@ Resources:
     Condition: WantsVpc
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W84
+            reason: Flow logs are non-sensitive network metadata; CMK encryption not required for this sample.
     Properties:
       LogGroupName: !Sub '/aws/${ProjectName}/vpc-flow-logs'
       RetentionInDays: 14
