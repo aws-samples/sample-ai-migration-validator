@@ -102,7 +102,7 @@ jobs:
         # Exit code 0 so the job is informational — base image CVEs outside our
         # control should not block CI. Review findings in the Security tab.
         # Pinned to SHA for supply-chain safety (v0.36.0).
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: migration-validator:ci
           format: sarif
@@ -122,7 +122,7 @@ jobs:
       - name: Trivy filesystem scan (secrets + misconfig)
         if: always()
         # Pinned to SHA for supply-chain safety (v0.36.0).
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           scan-type: fs
           format: sarif
