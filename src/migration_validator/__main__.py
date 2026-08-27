@@ -76,6 +76,23 @@ def main(
             ),
         ),
     ] = True,
+    allow_write_tests: Annotated[
+        bool,
+        typer.Option(
+            "--allow-write-tests",
+            help=(
+                "DANGEROUS: allow Functional/Performance Testing to actually "
+                "execute procedures that contain INSERT/UPDATE/DELETE/MERGE/ "
+                "TRUNCATE (directly or via a nested call), wrapped in a "
+                "transaction that is always rolled back. Off by default — the "
+                "validator only reads data unless you opt in. Procedures with "
+                "their own COMMIT/ROLLBACK/BEGIN TRAN are NEVER executed, even "
+                "with this flag, because such a transaction cannot be reliably "
+                "undone. Only use against disposable/test databases, never "
+                "production. You will be asked to confirm before any phase runs."
+            ),
+        ),
+    ] = False,
     log_level: Annotated[str, typer.Option(help="DEBUG | INFO | WARNING | ERROR")] = "INFO",
 ) -> None:
     """Run the validator."""
@@ -102,6 +119,7 @@ def main(
         sample_size=sample_size,
         allow_insecure=allow_insecure,
         redact_pii=redact_pii,
+        allow_write_tests=allow_write_tests,
         source_schema=source_schema,
         target_schema=target_schema,
     )

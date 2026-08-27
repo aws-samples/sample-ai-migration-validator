@@ -45,6 +45,7 @@ def render_html(path: Path, cfg: ValidatorConfig, results: Sequence[PhaseResult]
             "bedrock_guardrail_id": cfg.bedrock_guardrail_id,
             "source": cfg.source.safe_dict(),
             "target": cfg.target.safe_dict(),
+            "allow_write_tests": cfg.allow_write_tests,
         },
         phases=phases,
     )

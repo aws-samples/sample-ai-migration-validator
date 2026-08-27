@@ -63,6 +63,7 @@ class ValidatorConfig(BaseModel):
     sample_size: int = 100
     allow_insecure: bool = False
     redact_pii: bool = True
+    allow_write_tests: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +167,7 @@ def build_config(
     redact_pii: bool,
     source_schema: str | None,
     target_schema: str | None,
+    allow_write_tests: bool = False,
     interactive_fallback: bool = True,
 ) -> ValidatorConfig:
     """Build a ``ValidatorConfig`` by merging all configuration sources.
@@ -221,4 +223,5 @@ def build_config(
         sample_size=sample_size,
         allow_insecure=allow_insecure,
         redact_pii=redact_pii,
+        allow_write_tests=allow_write_tests,
     )

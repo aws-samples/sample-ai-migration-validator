@@ -109,6 +109,36 @@ def _print_banner() -> None:
     console.print()
 
 
+def _confirm_write_tests() -> bool:
+    """Loud, explicit confirmation gate for ``--allow-write-tests``.
+
+    Requires typing the exact word ``YES`` (not just an enter-to-accept
+    default) so this can't be triggered by muscle-memory / accidentally
+    pressing return. Called once, before any MCP session is created, so a
+    declined confirmation aborts the whole run before touching either
+    database.
+    """
+    warning = (
+        "[bold red]⚠ WRITE-TEST MODE ENABLED (--allow-write-tests)[/]\n\n"
+        "Functional and Performance Testing will [bold]actually execute[/] "
+        "stored procedures that contain INSERT/UPDATE/DELETE/MERGE/TRUNCATE "
+        "(directly, or via a nested procedure call), on [bold]both[/] the "
+        "source and target databases.\n\n"
+        "Each such call is wrapped in a transaction that is always rolled "
+        "back — [bold]except[/] procedures that issue their own COMMIT, "
+        "ROLLBACK, or BEGIN TRAN internally. Those remain permanently "
+        "blocked because such a transaction cannot be reliably undone by "
+        "this tool.\n\n"
+        "[bold]Only use this against disposable / non-production "
+        "databases.[/] Do not run this against real customer or production "
+        "data.\n"
+    )
+    console.print()
+    console.print(Panel(warning, title="Confirmation required", border_style="red"))
+    typed = Prompt.ask('Type "yes" to proceed, or anything else to abort')
+    return typed.strip().lower() == "yes"
+
+
 def _print_connectivity_note(cfg: ValidatorConfig) -> None:
     """Reminder shown after credentials are collected, before we attempt
     to actually connect. Saves users from staring at obscure timeout errors
@@ -217,6 +247,8 @@ def _render_phase(result: PhaseResult) -> None:
                     text = f"[yellow]{text}[/]"
                 elif val in ("missing_in_target", "mismatch"):
                     text = f"[red]{text}[/]"
+            elif k == "category" and val == "executed_write":
+                text = f"[bold orange3]⚠ {text}[/]"
             elif k == "match":
                 if val is True:
                     text = "[green]✓ match[/]"
@@ -326,10 +358,14 @@ def run(cfg: ValidatorConfig, phase_filter: Sequence[str] | None = None) -> Path
     # --------------------------------------------------------------
     # MCP sessions: one per unique connection, reused thereafter.
     # --------------------------------------------------------------
+    if cfg.allow_write_tests and not _confirm_write_tests():
+        console.print("[yellow]Write-test mode not confirmed; stopping.[/]")
+        return _abort(html_path, json_path, log_path, None)
+
     console.print()
     console.rule("[bold blue]MCP setup")
     mcp_log_path: Path | None = None
-    with MCPSessionManager(log_dir=cfg.report_dir) as sessions:
+    with MCPSessionManager(log_dir=cfg.report_dir, allow_write_tests=cfg.allow_write_tests) as sessions:
         mcp_log_path = sessions.errlog_path
         # Eagerly initialise both sessions so the user sees the lifecycle
         # messages before phases start, and so phase-1 timing isn't polluted

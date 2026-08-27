@@ -36,6 +36,7 @@ def write_json(path: Path, cfg: ValidatorConfig, results: Sequence[PhaseResult])
             "region": cfg.region,
             "perf_threshold_ms": cfg.perf_threshold_ms,
             "sample_size": cfg.sample_size,
+            "allow_write_tests": cfg.allow_write_tests,
         },
         "phases": phases,
     }

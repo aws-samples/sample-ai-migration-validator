@@ -55,7 +55,7 @@ CLI (typer) ─▶ build_config()  ─▶ ValidatorConfig (source + target)
 | CLI → Secrets Manager | IAM role grants `GetSecretValue` on exactly two secret ARNs. |
 | Validator → Bedrock | IAM role grants `InvokeModel` on exactly one model id. |
 | Orchestrator → MCP server | stdio subprocess. Connection password is passed via env, never on argv. |
-| MCP server → Database | `assert_read_only()` rejects any non-SELECT/SHOW/EXPLAIN statement and any multi-statement payload. PostgreSQL session sets `default_transaction_read_only=on`. SQL Server uses `ApplicationIntent=ReadOnly` on the connection plus `pyodbc.connect(readonly=True)`. |
+| MCP server → Database | `assert_read_only()` rejects any non-SELECT/SHOW/EXPLAIN statement and any multi-statement payload for `execute_select`/`execute_with_timing`/`explain_query` — unconditionally, with no opt-out. PostgreSQL session sets `default_transaction_read_only=on`. SQL Server uses `ApplicationIntent=ReadOnly` on the connection plus `pyodbc.connect(readonly=True)`. The separate `call_procedure`/`time_procedure` tools reject DML (directly or via nested calls) by default too, but may execute it when `--allow-write-tests` is set, always inside a transaction that is rolled back; procedures with their own COMMIT/ROLLBACK/BEGIN TRAN are rejected unconditionally regardless of that flag. |
 | Agent → MCP | Single point of egress; identifiers in tool arguments are validated by `_safe_ident()` before any string-based SQL is constructed inside the server. |
 
 ## Why MCP instead of direct DB calls?
@@ -81,7 +81,7 @@ CLI (typer) ─▶ build_config()  ─▶ ValidatorConfig (source + target)
 - Calls `list_procedures(schema)` and `procedure_parameters(schema, name)` on each side.
 - For each pair, calls `sample_table(schema, table, limit=1)` against the target to pull a real value for each input parameter.
 - Builds parameterised function invocations and calls `execute_select(sql)` on each side.
-- Compares normalised result sets; on diff, asks the LLM for a 1-2-sentence root-cause explanation. Procedures whose body contains DML keywords are skipped.
+- Compares normalised result sets; on diff, asks the LLM for a 1-2-sentence root-cause explanation. Procedures whose body (or a nested call) contains DML keywords are skipped by default. With `--allow-write-tests`, DML-containing procedures execute instead — wrapped in a rollback transaction — unless they (or a nested call) issue their own `COMMIT`/`ROLLBACK`/`BEGIN TRAN`, in which case they are always skipped regardless of the flag.
 
 ### 4. Performance Testing
 - Reuses the functional agent's metadata + test-case builder so source and target see identical calls.

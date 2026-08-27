@@ -49,6 +49,7 @@
   .pill.skipped { background: #eef0f2; color: var(--muted); }
   .pill.unsupported { background: #eef0f2; color: var(--muted); }
   .pill.executed { background: #e6f0ff; color: #1f4eb8; }
+  .pill.executed_write { background: #fdf0d5; color: #b45309; font-weight: 600; }
   .nowrap { white-space: nowrap; }
   details > summary { cursor: pointer; color: var(--muted); }
   code { background: #f5f6f7; padding: 0.05rem 0.35rem; border-radius: 4px; font-size: 0.82rem; }
@@ -72,6 +73,19 @@
     and notes. This is best-effort — review the report manually before sharing
     if your data may contain unusual identifiers (internal account numbers, etc.).
     To disable, re-run with <code>--no-redact-pii</code>.
+  </div>
+  {% endif %}
+
+  {% if config.allow_write_tests %}
+  <div style="border: 1px solid #dc7633; background: #fdf0d5; color: #8a4b00;
+              padding: 0.6rem 0.9rem; border-radius: 6px; margin-bottom: 1rem;
+              font-size: 0.88rem;">
+    <strong>⚠ Write-test mode was enabled for this run (--allow-write-tests).</strong>
+    Rows marked <span class="pill executed_write">executed_write</span> actually
+    ran procedures containing INSERT/UPDATE/DELETE/MERGE/TRUNCATE against
+    both databases, wrapped in a transaction that was rolled back. Procedures
+    with their own COMMIT/ROLLBACK/BEGIN TRAN were still skipped — see their
+    notes for details.
   </div>
   {% endif %}
 

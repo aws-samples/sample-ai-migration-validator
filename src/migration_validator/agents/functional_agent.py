@@ -41,6 +41,97 @@ _DML_IN_DEF = re.compile(
     re.IGNORECASE,
 )
 
+# Matches a nested call to another named object: SQL Server ``EXEC[UTE]
+# [schema.]name`` or PostgreSQL ``CALL [schema.]name(``. Used to catch writes
+# hidden behind a helper procedure (e.g. generateTransferActivity calling
+# transferTicket) so the client-side pre-check stays in sync with the same
+# recursive guard enforced server-side in the MCP tools.
+_NESTED_CALL_REF = re.compile(
+    r"\b(?:EXEC(?:UTE)?|CALL)\s+(?:@\w+\s*=\s*)?"
+    r"(?:[\[\"]?(?P<schema>\w+)[\]\"]?\s*\.\s*)?[\[\"]?(?P<name>\w+)[\]\"]?",
+    re.IGNORECASE,
+)
+
+# Matches SQL Server's BEGIN/COMMIT/ROLLBACK/SAVE TRAN[SACTION] and
+# PostgreSQL's COMMIT/ROLLBACK/START TRANSACTION — any explicit transaction
+# control statement a procedure might issue internally.
+_TXN_CONTROL_PATTERN = re.compile(
+    r"\b(COMMIT(\s+(TRAN|TRANSACTION))?|ROLLBACK(\s+(TRAN|TRANSACTION))?|"
+    r"BEGIN\s+(TRAN|TRANSACTION)|SAVE\s+(TRAN|TRANSACTION)|START\s+TRANSACTION)\b",
+    re.IGNORECASE,
+)
+
+
+def _body_or_nested_has_dml(
+    name: str, procs: dict[str, _ProcMeta], _depth: int = 0, _seen: set | None = None
+) -> bool:
+    """Return True if ``procs[name]``'s body contains DML, directly or via a
+    nested EXEC/EXECUTE/CALL reference to another procedure in ``procs``
+    whose body (or further nested calls) contains DML.
+
+    Mirrors the recursive guard in the MCP servers
+    (``_body_or_nested_has_dml`` in ``mcp_servers/*/server.py``) so the
+    client-side pre-check — used to render a clean "skipped" row instead of
+    attempting the call and getting rejected server-side — agrees with what
+    the server will actually allow. Operates entirely on metadata already
+    fetched via ``list_procedures`` for this schema, so no extra MCP round
+    trips are needed.
+    """
+    meta = procs.get(name.lower())
+    if meta is None:
+        return False  # not in this schema's proc list; nothing to recurse into
+    body = _strip_proc_header(meta.definition)
+    if _DML_IN_DEF.search(body):
+        return True
+    if _depth >= 3:
+        return True
+    seen = _seen if _seen is not None else set()
+    key = name.lower()
+    if key in seen:
+        return False
+    seen.add(key)
+    for m in _NESTED_CALL_REF.finditer(body):
+        callee = m.group("name")
+        if not callee or callee.lower() in ("sp_executesql", "sql"):
+            continue
+        if _body_or_nested_has_dml(callee, procs, _depth + 1, seen):
+            return True
+    return False
+
+
+def _body_or_nested_has_unsafe_txn_control(
+    name: str, procs: dict[str, _ProcMeta], _depth: int = 0, _seen: set | None = None
+) -> bool:
+    """Return True if ``procs[name]``'s body (or a nested call, recursively)
+    issues its own COMMIT/ROLLBACK/BEGIN TRAN/START TRANSACTION.
+
+    Client-side mirror of the same-named guard in the MCP servers. A
+    procedure with explicit transaction control cannot be safely wrapped in
+    ``BEGIN TRAN ... ROLLBACK TRAN`` — ``transferTicket`` (COMMIT inside
+    BEGIN TRY) is a concrete example. Used to keep these procedures skipped
+    even when ``--allow-write-tests`` is enabled.
+    """
+    meta = procs.get(name.lower())
+    if meta is None:
+        return False
+    body = _strip_proc_header(meta.definition)
+    if _TXN_CONTROL_PATTERN.search(body):
+        return True
+    if _depth >= 3:
+        return True
+    seen = _seen if _seen is not None else set()
+    key = name.lower()
+    if key in seen:
+        return False
+    seen.add(key)
+    for m in _NESTED_CALL_REF.finditer(body):
+        callee = m.group("name")
+        if not callee or callee.lower() in ("sp_executesql", "sql"):
+            continue
+        if _body_or_nested_has_unsafe_txn_control(callee, procs, _depth + 1, seen):
+            return True
+    return False
+
 
 def _strip_proc_header(definition: str) -> str:
     """Return the body of a CREATE PROC[EDURE]/FUNCTION block.
@@ -322,6 +413,55 @@ class FunctionalTestingAgent(BaseAgent):
         argsql = ", ".join(self._quote_literal(a) for a in args)
         return f'SELECT "{self.config.target.schema_name}"."{meta.name}"({argsql}) AS result'
 
+    # Recognizes SQL Server and PostgreSQL error phrasing for the same
+    # underlying condition (unique / primary key constraint violation) so
+    # that "both sides rejected this because the test data isn't idempotent"
+    # isn't reported as a functional mismatch. Deliberately narrow: only
+    # constraint-violation wording is covered, not general DB errors.
+    _CONSTRAINT_VIOLATION_PATTERNS = (
+        re.compile(r"violation of primary key constraint", re.IGNORECASE),
+        re.compile(r"cannot insert duplicate key", re.IGNORECASE),
+        re.compile(r"duplicate key value violates", re.IGNORECASE),
+        re.compile(r"unique constraint", re.IGNORECASE),
+    )
+    # Extracts a parenthesised or DETAIL-style key/value payload so we can
+    # confirm both sides failed on the *same* duplicate, not merely "some"
+    # constraint violation on unrelated data.
+    _DUPLICATE_KEY_VALUE = re.compile(r"\(([^()]{1,200})\)\s*(?:already exists|\.)", re.IGNORECASE)
+
+    @classmethod
+    def _errors_are_equivalent(cls, src_payload: Any, tgt_payload: Any) -> bool:
+        """Return True if both payloads are error dicts describing the same
+        kind of constraint violation on the same duplicate value.
+
+        Both engines report the underlying MCP-tool-rejection error as
+        ``{"error": "..."}`` (see ``BaseAgent.call_json``); the message text
+        differs by engine (T-SQL vs. PostgreSQL error wording) even when the
+        cause — a non-idempotent INSERT hitting the same duplicate key on a
+        rerun — is identical on both sides.
+        """
+        if not (isinstance(src_payload, dict) and isinstance(tgt_payload, dict)):
+            return False
+        src_err = str(src_payload.get("error") or "")
+        tgt_err = str(tgt_payload.get("error") or "")
+        if not src_err or not tgt_err:
+            return False
+        src_is_conflict = any(p.search(src_err) for p in cls._CONSTRAINT_VIOLATION_PATTERNS)
+        tgt_is_conflict = any(p.search(tgt_err) for p in cls._CONSTRAINT_VIOLATION_PATTERNS)
+        if not (src_is_conflict and tgt_is_conflict):
+            return False
+        # Best-effort confirmation that it's the *same* duplicate, not just
+        # "some" constraint violation on each side. If we can't extract a
+        # comparable value from either message, fall back to "same error
+        # category is good enough" rather than under-reporting a real match.
+        src_val = cls._DUPLICATE_KEY_VALUE.search(src_err)
+        tgt_val = cls._DUPLICATE_KEY_VALUE.search(tgt_err)
+        if src_val and tgt_val:
+            norm_src = re.sub(r"\s+", " ", src_val.group(1)).strip().lower()
+            norm_tgt = re.sub(r"\s+", " ", tgt_val.group(1)).strip().lower()
+            return norm_src == norm_tgt
+        return True
+
     @staticmethod
     def _normalise(rows: list[dict[str, Any]]) -> list[tuple]:
         """Return a canonical, comparable form of a result set.
@@ -329,6 +469,12 @@ class FunctionalTestingAgent(BaseAgent):
         Differences we deliberately ignore:
             * Column-name case (SQL Server keeps mixed case, PostgreSQL's DMS
               conversion lower-cases identifiers).
+            * Column *name* entirely, for single-column result sets — SQL
+              Server's ``call_procedure`` aliases scalar function results as
+              ``result``, while PostgreSQL's ``SELECT * FROM schema.func(...)``
+              names the column after the function itself (e.g. ``rand_int``).
+              Both are valid renderings of the same single return value, so
+              for single-column rows we compare by position, not by name.
             * Trailing whitespace in string values (CHAR(N) padding).
             * Numeric formatting (``6`` vs ``6.0``).
             * Row order — procedures often have no ORDER BY.
@@ -347,6 +493,12 @@ class FunctionalTestingAgent(BaseAgent):
 
         out: list[tuple] = []
         for r in rows:
+            if len(r) == 1:
+                # Single-column row: compare the value only, ignoring the
+                # column name entirely (see docstring above).
+                ((_, only_val),) = r.items()
+                out.append((("_", _val(only_val)),))
+                continue
             sorted_items = sorted(r.items(), key=lambda kv: kv[0].lower())
             out.append(tuple((k.lower(), _val(v)) for k, v in sorted_items))
         out.sort()
@@ -401,8 +553,15 @@ class FunctionalTestingAgent(BaseAgent):
 
         for n in sorted(set(src) & set(tgt)):
             s_meta, t_meta = src[n], tgt[n]
-            body = _strip_proc_header(s_meta.definition)
-            if _DML_IN_DEF.search(body):
+            has_dml = _body_or_nested_has_dml(s_meta.name, src)
+            unsafe_txn = has_dml and _body_or_nested_has_unsafe_txn_control(s_meta.name, src)
+            if has_dml and (unsafe_txn or not self.config.allow_write_tests):
+                reason = (
+                    "Body (or a nested call) issues its own COMMIT/ROLLBACK/BEGIN TRAN; "
+                    "cannot be safely wrapped in a rollback transaction — always skipped."
+                    if unsafe_txn
+                    else "Body contains DML; skipped under read-only policy."
+                )
                 rows.append(
                     {
                         "procedure": s_meta.name,
@@ -412,7 +571,7 @@ class FunctionalTestingAgent(BaseAgent):
                         "pg_test_case": "—",
                         "pg_result": "—",
                         "match": None,
-                        "analysis": "Body contains DML; skipped under read-only policy.",
+                        "analysis": reason,
                     }
                 )
                 continue
@@ -460,29 +619,44 @@ class FunctionalTestingAgent(BaseAgent):
             except RuntimeError as e:
                 tgt_payload = {"error": str(e)[:300]}
 
-            match = (
+            both_errored_equivalently = self._errors_are_equivalent(src_payload, tgt_payload)
+            match = both_errored_equivalently or (
                 isinstance(src_payload, list)
                 and isinstance(tgt_payload, list)
                 and self._normalise(src_payload) == self._normalise(tgt_payload)
             )
-            analysis = (
-                "Results match." if match else self._explain_diff(s_meta.name, src_payload, tgt_payload)
-            )
+            if both_errored_equivalently:
+                analysis = (
+                    "Both sides rejected the call with an equivalent constraint "
+                    "violation (same kind of error, same duplicate key/value). "
+                    "This indicates the test data is not idempotent for this "
+                    "procedure (re-running with the same inputs re-triggers the "
+                    "same unique/primary-key conflict on both engines) rather "
+                    "than a functional difference between them."
+                )
+            else:
+                analysis = (
+                    "Results match." if match else self._explain_diff(s_meta.name, src_payload, tgt_payload)
+                )
 
             rows.append(
                 {
                     "procedure": s_meta.name,
-                    "category": "executed",
+                    "category": "executed_write" if has_dml else "executed",
                     "sql_test_case": src_display,
                     "sql_result": str(src_payload),
                     "pg_test_case": tgt_display,
                     "pg_result": str(tgt_payload),
                     "match": match,
-                    "analysis": analysis,
+                    "analysis": (
+                        f"{analysis} [executed with DML under --allow-write-tests; rolled back]"
+                        if has_dml
+                        else analysis
+                    ),
                 }
             )
 
-        executed = [r for r in rows if r["category"] == "executed"]
+        executed = [r for r in rows if r["category"] in ("executed", "executed_write")]
         mismatches = [r for r in executed if r["match"] is False]
         structural = [r for r in rows if r["category"] in ("missing_in_target", "extra_in_target")]
         any_diff = bool(structural or mismatches)

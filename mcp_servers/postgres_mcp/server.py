@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import time
 from typing import Any
@@ -136,6 +137,114 @@ def _build_sample_column_query(schema: str, table: str, column: str, limit: int)
 def _safe_ident(s: str) -> bool:
     """Deprecated: use ``_valid_ident``."""
     return _valid_ident(s)
+
+
+_DML_PATTERN = re.compile(
+    r"\b(INSERT\s+INTO|UPDATE\s+\S|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE\s+TABLE)\b",
+    re.IGNORECASE,
+)
+_CALL_REF_PATTERN = re.compile(
+    r"\bCALL\s+(?:\"?(?P<schema>\w+)\"?\s*\.\s*)?\"?(?P<name>\w+)\"?\s*\(",
+    re.IGNORECASE,
+)
+
+
+# Opt-in flag: when true, procedures whose body (or nested CALLs) contain
+# DML are allowed to actually execute — wrapped in a transaction that is
+# always rolled back — instead of being rejected outright. Off by default;
+# set via PG_ALLOW_WRITE_TESTS=yes. Does NOT relax the unsafe-transaction
+# check below: procedures with their own COMMIT/ROLLBACK remain permanently
+# blocked because PostgreSQL procedures (unlike functions) CAN issue their
+# own transaction control, which our wrapper cannot reliably undo.
+_ALLOW_WRITE_TESTS = os.environ.get("PG_ALLOW_WRITE_TESTS", "no").lower() == "yes"
+
+_TXN_CONTROL_PATTERN = re.compile(r"\b(COMMIT|ROLLBACK|START\s+TRANSACTION)\b", re.IGNORECASE)
+
+
+def _body_or_nested_has_unsafe_txn_control(
+    schema: str, name: str, definition: str, _depth: int = 0, _seen: set | None = None
+) -> bool:
+    """Return True if ``definition`` (or anything it CALLs, recursively)
+    issues its own COMMIT/ROLLBACK.
+
+    PostgreSQL procedures (unlike functions) may contain their own
+    transaction control statements. If one commits internally, our own
+    surrounding ``ROLLBACK`` after the CALL cannot undo the already-committed
+    work. These procedures are always rejected for execution, with or
+    without ``PG_ALLOW_WRITE_TESTS``.
+    """
+    if _TXN_CONTROL_PATTERN.search(definition):
+        return True
+    if _depth >= 3:
+        return True
+    seen = _seen if _seen is not None else set()
+    key = (schema.lower(), name.lower())
+    if key in seen:
+        return False
+    seen.add(key)
+    for m in _CALL_REF_PATTERN.finditer(definition):
+        callee_schema = m.group("schema") or schema
+        callee_name = m.group("name")
+        if not callee_name or not _valid_ident(callee_schema) or not _valid_ident(callee_name):
+            continue
+        callee_meta = _query(
+            "SELECT pg_get_functiondef(p.oid) AS definition "
+            "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = %s AND p.proname = %s LIMIT 1",
+            (callee_schema, callee_name),
+        )
+        if not callee_meta:
+            continue
+        callee_def = callee_meta[0]["definition"] or ""
+        if _body_or_nested_has_unsafe_txn_control(callee_schema, callee_name, callee_def, _depth + 1, seen):
+            return True
+    return False
+
+
+def _body_or_nested_has_dml(
+    schema: str, name: str, definition: str, _depth: int = 0, _seen: set | None = None
+) -> bool:
+    """Return True if ``definition`` contains DML, directly or via a nested
+    ``CALL`` to another procedure in the same schema whose body (or further
+    nested calls) contains DML.
+
+    Rationale: the DML guard on ``call_procedure``/``time_procedure`` only
+    scanned the literal text of the outer procedure. A procedure that itself
+    contains no INSERT/UPDATE/DELETE but delegates writes to a helper
+    procedure via CALL (a common pattern in DMS/SCT-converted code — e.g.
+    ``generatetransferactivity`` calling ``transferticket``) would pass the
+    guard and reach a real CALL against the database, relying entirely on
+    the surrounding rollback transaction as the only backstop. This walks
+    the call graph (bounded depth + cycle guard) so the guard itself is the
+    primary control again.
+    """
+    if _DML_PATTERN.search(definition):
+        return True
+    if _depth >= 3:
+        return True  # bound recursion; reject defensively past this depth
+    seen = _seen if _seen is not None else set()
+    key = (schema.lower(), name.lower())
+    if key in seen:
+        return False  # cycle; already being checked up the call stack
+    seen.add(key)
+
+    for m in _CALL_REF_PATTERN.finditer(definition):
+        callee_schema = m.group("schema") or schema
+        callee_name = m.group("name")
+        if not callee_name or not _valid_ident(callee_schema) or not _valid_ident(callee_name):
+            continue
+        callee_meta = _query(
+            "SELECT pg_get_functiondef(p.oid) AS definition "
+            "FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE n.nspname = %s AND p.proname = %s LIMIT 1",
+            (callee_schema, callee_name),
+        )
+        if not callee_meta:
+            continue
+        callee_def = callee_meta[0]["definition"] or ""
+        if _body_or_nested_has_dml(callee_schema, callee_name, callee_def, _depth + 1, seen):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +383,13 @@ def list_objects(schema: str) -> str:
 
 @mcp.tool()
 def table_row_counts(schema: str) -> str:
-    """Return row count for every base table in the schema using ``COUNT(*)``."""
+    """Return row count for every base table in the schema using ``COUNT(*)``.
+
+    Reuses a single connection for all tables in the schema. Opening a fresh
+    TLS connection per table (the previous behaviour) is slow enough on
+    Aurora Serverless / high-latency links that it can exceed the per-connect
+    timeout partway through a large schema, failing the whole tool call.
+    """
     tables = _query(
         """
         SELECT table_name
@@ -285,12 +400,20 @@ def table_row_counts(schema: str) -> str:
         (schema,),
     )
     out: list[dict[str, Any]] = []
-    for r in tables:
-        tname = r["table_name"]
-        if not _valid_ident(tname):
-            continue
-        rows = _query_safe(_build_count_query(schema, tname), check_sql="SELECT COUNT")
-        out.append({"table_name": tname, "row_count": rows[0]["row_count"] if rows else 0})
+    # Sanity-check the query shape once, up front, the same way _query_safe()
+    # does per-call via its check_sql= param — cheap and keeps the read-only
+    # invariant asserted even though we build psql.Composed objects (which
+    # are safe by construction and don't go through assert_read_only()).
+    assert_read_only("SELECT COUNT")
+    with psycopg.connect(_conninfo(), row_factory=dict_row) as conn, conn.cursor() as cur:
+        cur.execute("SET default_transaction_read_only = on;")
+        for r in tables:
+            tname = r["table_name"]
+            if not _valid_ident(tname):
+                continue
+            _run_stmt(cur, _build_count_query(schema, tname))
+            rows = list(cur.fetchall()) if cur.description else []
+            out.append({"table_name": tname, "row_count": rows[0]["row_count"] if rows else 0})
     return json.dumps(out, default=str)
 
 
@@ -438,14 +561,23 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
     if not meta:
         return json.dumps({"error": "not_found", "reason": f"{schema}.{name}"})
     definition = meta[0]["definition"] or ""
-    import re as _re
-
-    if _re.search(
-        r"\b(INSERT\s+INTO|UPDATE\s+\S|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE\s+TABLE)\b",
-        definition,
-        flags=_re.IGNORECASE,
-    ):
+    # Writers, including ones hidden behind a nested CALL, are rejected
+    # unless the operator has explicitly opted in via PG_ALLOW_WRITE_TESTS=yes.
+    has_dml = _body_or_nested_has_dml(schema, name, definition)
+    if has_dml and not _ALLOW_WRITE_TESTS:
         return json.dumps({"error": "rejected", "reason": "object body contains DML"})
+    # Even with write-tests enabled, procedures with their own transaction
+    # control (COMMIT/ROLLBACK) are ALWAYS rejected — no override for this one.
+    if has_dml and _body_or_nested_has_unsafe_txn_control(schema, name, definition):
+        return json.dumps(
+            {
+                "error": "rejected",
+                "reason": (
+                    "object body (or a nested call) issues its own COMMIT/ROLLBACK "
+                    "and cannot be safely wrapped in a rollback transaction"
+                ),
+            }
+        )
 
     arg_modes_raw = meta[0]["arg_modes"] or ""
     arg_modes: list[str] = []
@@ -553,7 +685,13 @@ def explain_query(sql: str) -> str:
         assert_read_only(sql)
     except UnsafeStatementError as e:
         return json.dumps({"error": "rejected", "reason": str(e)})
-    rows = _query("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) " + sql)
+    # Compose the EXPLAIN wrapper via psql.SQL().format() rather than string
+    # concatenation, so the prefix is never built by joining raw strings with
+    # caller-supplied input. assert_read_only() above remains the statement-type
+    # guard; this composition only changes how the (already-validated) SQL text
+    # is combined with the EXPLAIN prefix before execution.
+    explain_stmt = psql.SQL("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {}").format(psql.SQL(sql))
+    rows = _query_safe(explain_stmt)
     return json.dumps(rows, default=str)
 
 
@@ -611,14 +749,19 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
     if not meta:
         return json.dumps({"error": "not_found", "reason": f"{schema}.{name}"})
     definition = meta[0]["definition"] or ""
-    import re as _re
-
-    if _re.search(
-        r"\b(INSERT\s+INTO|UPDATE\s+\S|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE\s+TABLE)\b",
-        definition,
-        flags=_re.IGNORECASE,
-    ):
+    has_dml = _body_or_nested_has_dml(schema, name, definition)
+    if has_dml and not _ALLOW_WRITE_TESTS:
         return json.dumps({"error": "rejected", "reason": "object body contains DML"})
+    if has_dml and _body_or_nested_has_unsafe_txn_control(schema, name, definition):
+        return json.dumps(
+            {
+                "error": "rejected",
+                "reason": (
+                    "object body (or a nested call) issues its own COMMIT/ROLLBACK "
+                    "and cannot be safely wrapped in a rollback transaction"
+                ),
+            }
+        )
 
     arg_modes_raw = meta[0]["arg_modes"] or ""
     arg_modes: list[str] = []
