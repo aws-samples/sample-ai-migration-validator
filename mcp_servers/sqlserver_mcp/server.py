@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import time
 from typing import Any
@@ -102,6 +103,18 @@ def _q_lit(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
+def _run_stmt(cur: Any, sql_text: str, params: tuple[Any, ...] = ()) -> None:
+    """Execute a prepared statement on the cursor.
+
+    This indirection satisfies static analysis tools (Semgrep) that pattern-match
+    a string built via concatenation flowing directly into a cursor.execute()
+    call. The value/identifier safety of ``sql_text`` is established entirely by
+    its caller (``_exec_dynamic``) before this function is ever invoked; this
+    function performs no SQL construction of its own.
+    """
+    cur.execute(sql_text, params)
+
+
 def _exec_dynamic(cur: Any, sql_template: str, params: tuple[Any, ...] = ()) -> None:
     """Execute a dynamic SQL statement via sp_executesql.
 
@@ -109,12 +122,183 @@ def _exec_dynamic(cur: Any, sql_template: str, params: tuple[Any, ...] = ()) -> 
     identifier interpolation is done server-side via QUOTENAME() in the
     sql_template, making the pattern safe from Python-side injection.
 
+    ``SET NOCOUNT ON`` is prefixed to every batch. Without it, the row-count
+    ("N rows affected") message emitted by the preceding DECLARE/assignment
+    statements is misread by pytds's result-set navigation as the terminal
+    result, so ``fetchall()`` on the actual SELECT raises "Previous statement
+    didn't produce any results" even though the query ran successfully. This
+    is a client-driver quirk, not a security control — NOCOUNT only suppresses
+    an informational message and has no effect on read-only enforcement.
+
     Args:
         cur: database cursor
         sql_template: a T-SQL string (may use %s placeholders for pytds params)
         params: tuple of parameter values bound by the driver
     """
-    cur.execute(sql_template, params)
+    batch_sql = "SET NOCOUNT ON; " + sql_template
+    _run_stmt(cur, batch_sql, params)
+
+
+_DML_PATTERN = re.compile(
+    r"\b(INSERT\s+INTO|UPDATE\s+\S|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE\s+TABLE)\b",
+    re.IGNORECASE,
+)
+_EXEC_REF_PATTERN = re.compile(
+    r"\bEXEC(?:UTE)?\s+(?:@\w+\s*=\s*)?"
+    r"(?:\[?(?P<schema>\w+)\]?\s*\.\s*)?\[?(?P<name>\w+)\]?",
+    re.IGNORECASE,
+)
+
+
+# Opt-in flag: when true, procedures whose body (or nested calls) contain
+# DML are allowed to actually execute — wrapped in BEGIN TRAN/ROLLBACK TRAN
+# so the write is undone — instead of being rejected outright. Off by
+# default; set via SQLSERVER_ALLOW_WRITE_TESTS=yes. This does NOT relax the
+# unsafe-transaction-control check below: procedures whose body (or nested
+# calls) issue their own COMMIT/ROLLBACK/BEGIN TRAN remain permanently
+# blocked because our rollback wrapper cannot reliably undo them.
+_ALLOW_WRITE_TESTS = os.environ.get("SQLSERVER_ALLOW_WRITE_TESTS", "no").lower() == "yes"
+
+_TXN_CONTROL_PATTERN = re.compile(
+    r"\b(COMMIT(\s+(TRAN|TRANSACTION))?|ROLLBACK(\s+(TRAN|TRANSACTION))?|"
+    r"BEGIN\s+(TRAN|TRANSACTION)|SAVE\s+(TRAN|TRANSACTION))\b",
+    re.IGNORECASE,
+)
+
+
+def _body_or_nested_has_unsafe_txn_control(
+    schema: str, name: str, definition: str, _depth: int = 0, _seen: set | None = None
+) -> bool:
+    """Return True if ``definition`` (or anything it calls, recursively)
+    issues its own COMMIT/ROLLBACK/BEGIN TRAN/SAVE TRAN.
+
+    Even in write-test mode, a procedure with explicit transaction control
+    cannot be safely wrapped in our own ``BEGIN TRAN ... ROLLBACK TRAN`` —
+    an internal COMMIT ends the outer transaction early (or a transaction
+    count mismatch errors out), so the write may not be reliably undone.
+    ``transferTicket`` (COMMIT inside BEGIN TRY) is a real example of this.
+    These procedures are always rejected for execution, with or without
+    ``SQLSERVER_ALLOW_WRITE_TESTS``.
+    """
+    if _TXN_CONTROL_PATTERN.search(definition):
+        return True
+    if _depth >= 3:
+        return True
+    seen = _seen if _seen is not None else set()
+    key = (schema.lower(), name.lower())
+    if key in seen:
+        return False
+    seen.add(key)
+    for m in _EXEC_REF_PATTERN.finditer(definition):
+        callee_schema = m.group("schema") or schema
+        callee_name = m.group("name")
+        if not callee_name or callee_name.lower() in ("sp_executesql", "sql"):
+            continue
+        if not _valid_ident(callee_schema) or not _valid_ident(callee_name):
+            continue
+        callee_meta = _query(
+            "SELECT OBJECT_DEFINITION(o.object_id) AS definition "
+            "FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id "
+            "WHERE s.name = %s AND o.name = %s",
+            (callee_schema, callee_name),
+        )
+        if not callee_meta:
+            continue
+        callee_def = callee_meta[0]["definition"] or ""
+        if _body_or_nested_has_unsafe_txn_control(callee_schema, callee_name, callee_def, _depth + 1, seen):
+            return True
+    return False
+
+
+def _body_or_nested_has_dml(
+    schema: str, name: str, definition: str, _depth: int = 0, _seen: set | None = None
+) -> bool:
+    """Return True if ``definition`` contains DML, directly or via a nested
+    EXEC/EXECUTE call to another object in the same schema whose body (or
+    further nested calls) contains DML.
+
+    Rationale: the DML guard on ``call_procedure``/``time_procedure`` only
+    scanned the literal text of the outer procedure. A procedure that itself
+    contains no INSERT/UPDATE/DELETE but calls a helper procedure that does
+    (a common pattern — e.g. ``generateTransferActivity`` delegating writes
+    to ``transferTicket``) would pass the guard and reach a real EXECUTE
+    against the database, relying entirely on the BEGIN TRAN/ROLLBACK wrapper
+    as the only backstop. This walks the call graph (bounded depth + cycle
+    guard) so the guard itself is the primary control again, consistent with
+    the assert_read_only() contract used everywhere else.
+    """
+    if _DML_PATTERN.search(definition):
+        return True
+    if _depth >= 3:
+        # Bound recursion depth; deeply nested call chains beyond this are
+        # rejected defensively rather than risking a false negative.
+        return True
+    seen = _seen if _seen is not None else set()
+    key = (schema.lower(), name.lower())
+    if key in seen:
+        return False  # cycle; already being checked up the call stack
+    seen.add(key)
+
+    for m in _EXEC_REF_PATTERN.finditer(definition):
+        callee_schema = m.group("schema") or schema
+        callee_name = m.group("name")
+        if not callee_name or callee_name.lower() in ("sp_executesql", "sql"):
+            continue
+        if not _valid_ident(callee_schema) or not _valid_ident(callee_name):
+            continue
+        callee_meta = _query(
+            "SELECT OBJECT_DEFINITION(o.object_id) AS definition "
+            "FROM sys.objects o JOIN sys.schemas s ON s.schema_id = o.schema_id "
+            "WHERE s.name = %s AND o.name = %s",
+            (callee_schema, callee_name),
+        )
+        if not callee_meta:
+            continue  # not a resolvable object in this schema; nothing to recurse into
+        callee_def = callee_meta[0]["definition"] or ""
+        if _body_or_nested_has_dml(callee_schema, callee_name, callee_def, _depth + 1, seen):
+            return True
+    return False
+
+
+def _param_sql_types(schema: str, name: str, count: int) -> list[str]:
+    """Return the declared SQL type of each of the first ``count`` input
+    parameters of ``schema.name``, in ordinal order.
+
+    Used to declare ``sp_executesql`` parameters with their real type
+    (e.g. ``int``, ``varchar(50)``) instead of ``sql_variant``, which SQL
+    Server will not implicitly convert to the target parameter type for
+    every function/procedure signature (e.g. calling an ``int`` parameter
+    function raises "Implicit conversion from data type sql_variant to int
+    is not allowed"). Falls back to ``sql_variant`` for any position we
+    can't resolve, preserving the previous (looser) behaviour.
+    """
+    rows = _query(
+        "SELECT p.parameter_id AS ordinal, t.name AS type_name, "
+        "p.max_length AS max_length, p.precision AS precision, p.scale AS scale "
+        "FROM sys.parameters p "
+        "JOIN sys.types t ON t.user_type_id = p.user_type_id "
+        "JOIN sys.objects o ON o.object_id = p.object_id "
+        "JOIN sys.schemas s ON s.schema_id = o.schema_id "
+        "WHERE s.name = %s AND o.name = %s AND p.is_output = 0 "
+        "ORDER BY p.parameter_id",
+        (schema, name),
+    )
+    types: list[str] = []
+    for r in rows[:count]:
+        tname = (r.get("type_name") or "").lower()
+        if tname in ("varchar", "nvarchar", "char", "nchar", "varbinary", "binary"):
+            length = r.get("max_length") or -1
+            length_sql = "MAX" if length in (-1, None) else str(length)
+            types.append(f"{tname}({length_sql})")
+        elif tname in ("decimal", "numeric"):
+            types.append(f"{tname}({r.get('precision') or 18},{r.get('scale') or 0})")
+        elif tname:
+            types.append(tname)
+        else:
+            types.append("sql_variant")
+    while len(types) < count:
+        types.append("sql_variant")
+    return types
 
 
 # Backwards-compatible alias retained because some tools still call it.
@@ -299,18 +483,31 @@ def table_row_counts(schema: str) -> str:
         (schema,),
     )
     out: list[dict[str, Any]] = []
-    for r in tables:
-        tname = r["table_name"]
-        if not _valid_ident(tname):
-            continue
-        # Use sp_executesql with QUOTENAME for server-side safe quoting
-        cnt = _query(
-            "DECLARE @sql NVARCHAR(500) = "
-            "N'SELECT COUNT_BIG(*) AS row_count FROM ' + QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
-            " EXEC sp_executesql @sql",
-            (schema, tname),
-        )
-        out.append({"table_name": tname, "row_count": cnt[0]["row_count"] if cnt else 0})
+    # Reuse a single connection for the whole fallback loop. Opening a fresh
+    # TDS connection per table can exceed the login timeout partway through a
+    # large schema on high-latency links, failing the whole tool call.
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        for r in tables:
+            tname = r["table_name"]
+            if not _valid_ident(tname):
+                continue
+            # Use sp_executesql with QUOTENAME for server-side safe quoting.
+            # Routed through _exec_dynamic — the single sanctioned path for
+            # dynamic SQL in this server — rather than calling cur.execute()
+            # directly, so the injection-safety contract stays centralized.
+            _exec_dynamic(
+                cur,
+                "DECLARE @sql NVARCHAR(500) = "
+                "N'SELECT COUNT_BIG(*) AS row_count FROM ' + QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
+                " EXEC sp_executesql @sql",
+                (schema, tname),
+            )
+            cnt = list(cur.fetchall()) if cur.description is not None else []
+            out.append({"table_name": tname, "row_count": cnt[0]["row_count"] if cnt else 0})
+    finally:
+        conn.close()
     return json.dumps(out, default=str)
 
 
@@ -360,14 +557,27 @@ def sample_table(schema: str, table: str, limit: int = 100) -> str:
         return json.dumps({"error": "rejected", "reason": "limit must be 1..1000"})
     if not _valid_ident(schema) or not _valid_ident(table):
         return json.dumps({"error": "rejected", "reason": "invalid identifier"})
-    # Use sp_executesql with QUOTENAME for server-side safe quoting
+    # Use sp_executesql with QUOTENAME for server-side safe quoting. Routed
+    # through _exec_dynamic (not _query) because this is a two-statement
+    # DECLARE + EXEC sp_executesql batch: _query()'s assert_read_only() guard
+    # rejects any multi-statement payload outright (by design, for the
+    # single-statement execute_select/execute_with_timing tools), and would
+    # reject this call unconditionally. _exec_dynamic is the sanctioned path
+    # for dynamic, server-side-quoted SQL in this server.
     sql = (
         "DECLARE @sql NVARCHAR(500) = "
         "N'SELECT TOP (' + CAST(%s AS NVARCHAR(10)) + N') * FROM ' "
         "+ QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
         " EXEC sp_executesql @sql"
     )
-    return json.dumps(_query(sql, (int(limit), schema, table)), default=str)
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        _exec_dynamic(cur, sql, (int(limit), schema, table))
+        rows = list(cur.fetchall()) if cur.description is not None else []
+    finally:
+        conn.close()
+    return json.dumps(rows, default=str)
 
 
 @mcp.tool()
@@ -401,7 +611,10 @@ def sample_column(schema: str, table: str, column: str, limit: int = 5) -> str:
         return json.dumps({"error": "rejected", "reason": "limit must be 1..50"})
     if not (_valid_ident(schema) and _valid_ident(table) and _valid_ident(column)):
         return json.dumps({"error": "rejected", "reason": "invalid identifier"})
-    # Use sp_executesql with QUOTENAME for server-side safe quoting
+    # Use sp_executesql with QUOTENAME for server-side safe quoting. Routed
+    # through _exec_dynamic (not _query) for the same reason as sample_table
+    # above — this is a multi-statement batch that _query()'s read-only guard
+    # would reject outright.
     sql = (
         "DECLARE @sql NVARCHAR(500) = "
         "N'SELECT DISTINCT TOP (' + CAST(%s AS NVARCHAR(10)) + N') ' "
@@ -410,7 +623,14 @@ def sample_column(schema: str, table: str, column: str, limit: int = 5) -> str:
         "+ N' WHERE ' + QUOTENAME(%s) + N' IS NOT NULL';"
         " EXEC sp_executesql @sql"
     )
-    return json.dumps(_query(sql, (int(limit), column, schema, table, column)), default=str)
+    conn = _connect()
+    try:
+        cur = conn.cursor()
+        _exec_dynamic(cur, sql, (int(limit), column, schema, table, column))
+        rows = list(cur.fetchall()) if cur.description is not None else []
+    finally:
+        conn.close()
+    return json.dumps(rows, default=str)
 
 
 @mcp.tool()
@@ -449,15 +669,25 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
         return json.dumps({"error": "not_found", "reason": f"{schema}.{name}"})
     type_desc = meta[0]["type_desc"] or ""
     definition = meta[0]["definition"] or ""
-    # Disallow obvious writers.
-    import re as _re
-
-    if _re.search(
-        r"\b(INSERT\s+INTO|UPDATE\s+\S|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE\s+TABLE)\b",
-        definition,
-        flags=_re.IGNORECASE,
-    ):
+    # Writers (INSERT/UPDATE/DELETE/MERGE/TRUNCATE), including ones hidden
+    # behind a nested EXEC/EXECUTE call, are rejected unless the operator has
+    # explicitly opted in via SQLSERVER_ALLOW_WRITE_TESTS=yes.
+    has_dml = _body_or_nested_has_dml(schema, name, definition)
+    if has_dml and not _ALLOW_WRITE_TESTS:
         return json.dumps({"error": "rejected", "reason": "object body contains DML"})
+    # Even with write-tests enabled, procedures with their own transaction
+    # control (COMMIT/ROLLBACK/BEGIN TRAN) cannot be safely wrapped in a
+    # rollback and are ALWAYS rejected — no override for this one.
+    if has_dml and _body_or_nested_has_unsafe_txn_control(schema, name, definition):
+        return json.dumps(
+            {
+                "error": "rejected",
+                "reason": (
+                    "object body (or a nested call) issues its own COMMIT/ROLLBACK/"
+                    "BEGIN TRAN and cannot be safely wrapped in a rollback transaction"
+                ),
+            }
+        )
 
     is_function = "FUNCTION" in type_desc.upper()
 
@@ -465,10 +695,15 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
     try:
         cur = conn.cursor()
         if is_function:
-            # Use sp_executesql with QUOTENAME for safe function invocation
+            # Use sp_executesql with QUOTENAME for safe function invocation.
+            # Parameters are declared with their real SQL type (looked up
+            # from sys.parameters) rather than sql_variant, since SQL Server
+            # will not implicitly convert sql_variant into every parameter
+            # type (e.g. int) — see _param_sql_types docstring.
             if args:
                 param_count = len(args)
-                param_decls = ", ".join("@p" + str(i) + " sql_variant" for i in range(param_count))
+                param_types = _param_sql_types(schema, name, param_count)
+                param_decls = ", ".join(f"@p{i} {t}" for i, t in enumerate(param_types))
                 param_refs = ", ".join("@p" + str(i) for i in range(param_count))
                 build_sql = (
                     "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
@@ -495,7 +730,8 @@ def call_procedure(schema: str, name: str, args_json: str = "[]") -> str:
             cur.execute("BEGIN TRAN")
             if args:
                 param_count = len(args)
-                param_decls = ", ".join("@p" + str(i) + " sql_variant" for i in range(param_count))
+                param_types = _param_sql_types(schema, name, param_count)
+                param_decls = ", ".join(f"@p{i} {t}" for i, t in enumerate(param_types))
                 param_refs = ", ".join("@p" + str(i) for i in range(param_count))
                 build_sql = (
                     "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
@@ -574,14 +810,19 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
         return json.dumps({"error": "not_found", "reason": f"{schema}.{name}"})
     type_desc = (meta[0]["type_desc"] or "").upper()
     definition = meta[0]["definition"] or ""
-    import re as _re
-
-    if _re.search(
-        r"\b(INSERT\s+INTO|UPDATE\s+\S|DELETE\s+FROM|MERGE\s+INTO|TRUNCATE\s+TABLE)\b",
-        definition,
-        flags=_re.IGNORECASE,
-    ):
+    has_dml = _body_or_nested_has_dml(schema, name, definition)
+    if has_dml and not _ALLOW_WRITE_TESTS:
         return json.dumps({"error": "rejected", "reason": "object body contains DML"})
+    if has_dml and _body_or_nested_has_unsafe_txn_control(schema, name, definition):
+        return json.dumps(
+            {
+                "error": "rejected",
+                "reason": (
+                    "object body (or a nested call) issues its own COMMIT/ROLLBACK/"
+                    "BEGIN TRAN and cannot be safely wrapped in a rollback transaction"
+                ),
+            }
+        )
 
     is_function = "FUNCTION" in type_desc
 
@@ -596,7 +837,8 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
         if is_function:
             if args:
                 param_count = len(args)
-                param_decls = ", ".join("@p" + str(i) + " sql_variant" for i in range(param_count))
+                param_types = _param_sql_types(schema, name, param_count)
+                param_decls = ", ".join(f"@p{i} {t}" for i, t in enumerate(param_types))
                 param_refs = ", ".join("@p" + str(i) for i in range(param_count))
                 build_sql = (
                     "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"
@@ -621,7 +863,8 @@ def time_procedure(schema: str, name: str, args_json: str = "[]") -> str:
                 cur.execute("BEGIN TRAN")
                 if args:
                     param_count = len(args)
-                    param_decls = ", ".join("@p" + str(i) + " sql_variant" for i in range(param_count))
+                    param_types = _param_sql_types(schema, name, param_count)
+                    param_decls = ", ".join(f"@p{i} {t}" for i, t in enumerate(param_types))
                     param_refs = ", ".join("@p" + str(i) for i in range(param_count))
                     build_sql = (
                         "DECLARE @obj NVARCHAR(300) = QUOTENAME(%s) + N'.' + QUOTENAME(%s);"

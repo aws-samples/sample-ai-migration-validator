@@ -37,9 +37,13 @@ htmlcov/
 # IDE
 .idea/
 .vscode/
+.kiro/
 *.swp
 *.swo
 .DS_Store
+
+# Local build/packaging artifacts
+*.zip
 
 # Project artifacts
 /reports/

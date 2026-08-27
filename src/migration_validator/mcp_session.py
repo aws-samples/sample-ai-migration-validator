@@ -127,11 +127,21 @@ class MCPSession:
 
 
 class MCPSessionManager:
-    """Spins up and reuses MCP sessions for source / target connections."""
+    """Spins up and reuses MCP sessions for source / target connections.
 
-    def __init__(self, log_dir: Path | None = None) -> None:
+    ``allow_write_tests``, when True, is forwarded to every MCP server this
+    manager creates (via ``*_ALLOW_WRITE_TESTS=yes``), enabling
+    ``call_procedure``/``time_procedure`` to actually execute procedures that
+    contain DML — always inside a transaction that is rolled back, and never
+    for procedures with their own COMMIT/ROLLBACK/BEGIN TRAN. Off by default;
+    the orchestrator gates this behind an explicit user confirmation before
+    any phase runs (see ``orchestrator._confirm_write_tests``).
+    """
+
+    def __init__(self, log_dir: Path | None = None, allow_write_tests: bool = False) -> None:
         self._sessions: dict[MCPFingerprint, MCPSession] = {}
         self._closed = False
+        self._allow_write_tests = allow_write_tests
         # Persist the MCP server stderr alongside the validation reports so
         # the user can inspect what the servers actually said after the run
         # completes. Each run gets its own timestamped file.
@@ -202,7 +212,7 @@ class MCPSessionManager:
             f"  [cyan]+ Creating MCP session [{fp.short()}] for {role} "
             f"({details.engine} {details.host}:{details.port}/{details.database})[/]"
         )
-        client = self._build_client(details, self._errlog)
+        client = self._build_client(details, self._errlog, self._allow_write_tests)
         client.start()
         try:
             tool_listing = client.list_tools_sync()
@@ -218,7 +228,9 @@ class MCPSessionManager:
 
     # ------------------------------------------------------------------
     @staticmethod
-    def _build_client(details: ConnectionDetails, errlog: IO[str]) -> MCPClient:
+    def _build_client(
+        details: ConnectionDetails, errlog: IO[str], allow_write_tests: bool = False
+    ) -> MCPClient:
         """Return an unstarted ``MCPClient`` configured for the right engine."""
         if details.engine == "sqlserver":
             module = "mcp_servers.sqlserver_mcp.server"
@@ -230,6 +242,7 @@ class MCPSessionManager:
                 "SQLSERVER_PASSWORD": details.password.get_secret_value(),
                 "SQLSERVER_ENCRYPT": "yes" if details.encrypt else "no",
                 "SQLSERVER_ALLOWED_SCHEMA": details.schema_name,
+                "SQLSERVER_ALLOW_WRITE_TESTS": "yes" if allow_write_tests else "no",
             }
         elif details.engine == "postgresql":
             module = "mcp_servers.postgres_mcp.server"
@@ -241,6 +254,7 @@ class MCPSessionManager:
                 "PG_PASSWORD": details.password.get_secret_value(),
                 "PG_SSLMODE": "require" if details.encrypt else "prefer",
                 "PG_ALLOWED_SCHEMA": details.schema_name,
+                "PG_ALLOW_WRITE_TESTS": "yes" if allow_write_tests else "no",
             }
         else:
             raise ValueError(f"Unsupported engine: {details.engine}")

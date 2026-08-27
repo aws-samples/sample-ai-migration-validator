@@ -33,7 +33,11 @@ from typing import Any
 
 from ..utils import logging as _log
 from .base import BaseAgent, PhaseResult
-from .functional_agent import FunctionalTestingAgent
+from .functional_agent import (
+    FunctionalTestingAgent,
+    _body_or_nested_has_dml,
+    _body_or_nested_has_unsafe_txn_control,
+)
 
 log = _log.get(__name__)
 
@@ -162,6 +166,42 @@ class PerformanceAgent(BaseAgent):
             s_meta = src_procs[proc_key]
             t_meta = tgt_procs[proc_key]
 
+            # Mirror the functional agent's client-side DML pre-check (which
+            # itself mirrors the MCP servers' recursive guard) so we never
+            # attempt a timed EXEC/CALL against a write-capable procedure,
+            # including writes hidden behind a nested call to a helper
+            # procedure (e.g. generateTransferActivity -> transferTicket),
+            # unless the operator has explicitly opted in via
+            # --allow-write-tests. Procedures with their own transaction
+            # control (COMMIT/ROLLBACK/BEGIN TRAN) are always skipped,
+            # regardless of that flag, because such a call cannot be safely
+            # wrapped in a rollback. Checking here (instead of relying solely
+            # on the MCP server's rejection) avoids 4 wasted round-trips (1
+            # warm-up + 3 timed cases) per side for procedures we already
+            # know will be rejected, and keeps the report's Notes column
+            # readable instead of repeating the same rejection reason
+            # multiple times.
+            has_dml = _body_or_nested_has_dml(s_meta.name, src_procs)
+            unsafe_txn = has_dml and _body_or_nested_has_unsafe_txn_control(s_meta.name, src_procs)
+            if has_dml and (unsafe_txn or not self.config.allow_write_tests):
+                notes = (
+                    "Body (or a nested call) issues its own COMMIT/ROLLBACK/BEGIN TRAN; "
+                    "cannot be safely wrapped in a rollback transaction — always skipped."
+                    if unsafe_txn
+                    else "Body contains DML; skipped under read-only policy."
+                )
+                rows.append(
+                    {
+                        "procedure": s_meta.name,
+                        "sql_server_ms": None,
+                        "postgresql_ms": None,
+                        "delta_ms": None,
+                        "status": "skipped",
+                        "notes": notes,
+                    }
+                )
+                continue
+
             cases = self._build_test_cases(ft, s_meta)
             if not cases:
                 continue
@@ -234,7 +274,11 @@ class PerformanceAgent(BaseAgent):
                     "postgresql_ms": tgt_med if tgt_med >= 0 else None,
                     "delta_ms": (None if (src_med < 0 or tgt_med < 0) else round(tgt_med - src_med, 3)),
                     "status": status,
-                    "notes": notes,
+                    "notes": (
+                        f"{notes} [timed with DML under --allow-write-tests; rolled back]"
+                        if has_dml
+                        else notes
+                    ),
                 }
             )
 

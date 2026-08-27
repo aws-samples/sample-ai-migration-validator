@@ -106,7 +106,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the deeper design notes.
 - **Python 3.11+** (Python 3.12 recommended). On macOS: `brew install python@3.12`.
 - **AWS account** with Bedrock model access enabled (Anthropic Claude 3.5 Sonnet or newer recommended). See [Bedrock model access](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html).
 - **Network reachability** from your machine to both source and target databases.
-- **Read-only DB credentials** for both source and target. The validator never executes DDL or DML — it only reads.
+- **Read-only DB credentials** for both source and target. By default the validator never executes DDL or DML — it only reads. An opt-in `--allow-write-tests` flag exists for Functional/Performance Testing to actually exercise DML-containing procedures (see [Security](#security)); leave it off unless you need that.
 
 That's it. No ODBC driver, no Homebrew taps, no Docker. The SQL Server connector is pure Python.
 
@@ -205,6 +205,7 @@ Common flags:
 | `--redact-pii` / `--no-redact-pii` | `--redact-pii` | Redact common PII patterns (email, phone, SSN, IBAN, credit card, IP, private keys) from reports |
 | `--perf-threshold-ms` | `5` | Flag if target is slower by more than this |
 | `--sample-size` | `100` | Rows sampled for functional test-case generation |
+| `--allow-write-tests` | off | **DANGEROUS.** Let Functional/Performance Testing execute DML-containing procedures (rolled back afterward). Prompts for explicit `YES` confirmation. Never use against production. |
 
 ---
 
@@ -223,7 +224,8 @@ Common flags:
 - **Private network path (optional, default ON in CFN).** The same template provisions a small VPC with two private subnets and PrivateLink interface endpoints for Bedrock Runtime, Secrets Manager, KMS, STS and CloudWatch Logs — so the validator never reaches AWS APIs over the public internet. Set `CreateVpc=false` if you already have a VPC and provision endpoints separately.
 - **Bedrock Guardrails.** Pass `--guardrail-id <id>` and every LLM call goes through the named guardrail (PII filter, denied topics, content filters). Recommended for any run that ingests real customer data.
 - **PII redaction in reports.** Procedure result rows and test-case argument values are scrubbed for emails, phone numbers, SSN, credit cards (Luhn-validated), IBANs, IPv4 and PEM private-key blocks before being written to HTML / JSON. On by default; disable with `--no-redact-pii`.
-- **Read-only enforcement.** The MCP servers reject any statement that is not `SELECT`/`SHOW`/`EXPLAIN`. Procedure invocations route through a dedicated `call_procedure` tool that gates on a DML check and runs each procedure inside a `BEGIN ... ROLLBACK` for defence in depth.
+- **Read-only enforcement (default).** The MCP servers reject any statement that is not `SELECT`/`SHOW`/`EXPLAIN`. Procedure invocations route through a dedicated `call_procedure` tool that gates on a DML check — including DML hidden behind a nested procedure call — and rejects execution outright unless write-tests are explicitly enabled.
+- **Opt-in write-testing (`--allow-write-tests`).** Off by default. When enabled, Functional/Performance Testing may execute procedures containing INSERT/UPDATE/DELETE/MERGE/TRUNCATE, always wrapped in a transaction that is rolled back afterward. Procedures that issue their own `COMMIT`/`ROLLBACK`/`BEGIN TRAN` internally (directly or via a nested call) are **always** rejected, with or without this flag, because such a transaction cannot be reliably undone by the wrapper. Enabling the flag requires typing `yes` at an explicit confirmation prompt before any database session is opened. **Only use this against disposable/non-production databases.**
 - **TLS** is required for both DB connections by default (`Encrypt=yes` for SQL Server, `sslmode=require` for PostgreSQL). Override only with `--allow-insecure` (not recommended).
 - **Prompt injection mitigation.** Tool outputs are summarised before being passed to the LLM, and the orchestrator never executes free-form SQL produced by the LLM without it going through the MCP tool whitelist.
 - **Static + supply-chain + container scanning in CI**:
